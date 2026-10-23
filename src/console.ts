@@ -757,12 +757,6 @@ function sitemapsUrl(site: SiteUrl, sitemapIndex: string | undefined): string {
   return `${base}?sitemapIndex=${encodeURIComponent(sitemapIndex)}`;
 }
 
-function optionalTimestamp(record: Record<string, unknown>, key: string): { ok: true; value: string | null } | { ok: false } {
-  if (!Object.hasOwn(record, key) || record[key] === undefined || record[key] === null) return { ok: true, value: null };
-  if (typeof record[key] !== 'string') return { ok: false };
-  return { ok: true, value: record[key] };
-}
-
 function parseContents(value: unknown): SitemapContent[] | null {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) return null;
@@ -783,8 +777,8 @@ function parseSitemap(value: unknown): Sitemap | null {
   const warnings = finiteNumber(value.warnings);
   const errors = finiteNumber(value.errors);
   if (warnings === null || errors === null) return null;
-  const lastSubmitted = optionalTimestamp(value, 'lastSubmitted');
-  const lastDownloaded = optionalTimestamp(value, 'lastDownloaded');
+  const lastSubmitted = optionalString(value, 'lastSubmitted');
+  const lastDownloaded = optionalString(value, 'lastDownloaded');
   if (!lastSubmitted.ok || !lastDownloaded.ok) return null;
   const contents = parseContents(value.contents);
   if (contents === null) return null;

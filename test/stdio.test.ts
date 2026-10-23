@@ -75,7 +75,6 @@ test('stdio tools/list names list_sites, search_analytics, inspect_url, and list
   const child = serve();
   const client = session(child);
   try {
-    const listed = client.wait(2);
     client.send({
       jsonrpc: '2.0',
       id: 1,
@@ -88,6 +87,7 @@ test('stdio tools/list names list_sites, search_analytics, inspect_url, and list
     });
     await client.wait(1);
     client.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+    const listed = client.wait(2);
     client.send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     const message = await listed;
     assert.ok(isRecord(message));
