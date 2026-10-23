@@ -1,0 +1,9 @@
+node_modules
+dist
+.env
+.cursor/hooks
+*.partial
+client.json
+token.json
+credentials.json
+client_secret*.json
