@@ -208,12 +208,12 @@ On mini.local the build lives in `/srv/gsc-mcp` and systemd runs it as `gsc-mcp.
 
 ### Browser login (server)
 
-`serve-http` can complete Google sign-in in any browser instead of the workstation CLI. In Google Cloud Console create a **Web application** OAuth client (Desktop clients reject non-loopback redirects) and register the authorized redirect URI byte-for-byte as `GSC_LOGIN_REDIRECT_URL`.
+`serve-http` can complete Google sign-in in any browser instead of the workstation CLI over Google's OAuth **device code flow**: the server POSTs `https://oauth2.googleapis.com/device/code` with an installed-type client, shows a one-time user code and Google's verification URL, and the page's three-second refresh polls the token endpoint once Google's poll interval has elapsed. No redirect URI is involved, which is why the login client is a **TVs and Limited Input** OAuth client — Google Cloud Console rejects `*.local` redirect URIs, so Web and Desktop clients cannot complete a browser login on mini. Create the TV client, take Google's `client_secret_*.json` download (an `{"installed":{...}}` wrapper without `redirect_uris`; the `{"web":{...}}` shape parses too), and put it on mini: `scp client_secret_*.json mini.local:.config/gsc-mcp/client-web.json`.
 
 ```text
-GSC_OAUTH_WEB_CLIENT_FILE=/home/toni/.config/gsc-mcp/client-web.json   # Google's unmodified {"web":{...}} download
-GSC_LOGIN_REDIRECT_URL=https://mini.local/mcp/gsc/login/callback       # the exact registered redirect
+GSC_OAUTH_WEB_CLIENT_FILE=/home/toni/.config/gsc-mcp/client-web.json   # the unmodified Google client_secret_*.json download
+GSC_LOGIN_URL=https://mini.local/mcp/gsc/login/                        # this page's public URL
 node dist/main.js serve-http
 ```
 
-Open `https://mini.local/mcp/gsc/login/` in a browser; it redirects to Google, and after consent `GET .../login/callback` writes the token file (mode `0600`) and the running process adopts the refresh token immediately. Tools work without a restart. `not_logged_in` messages then name the login page instead of the CLI. The token file gains a `client` field, `web` or `desktop`, the kind that minted it; a file without it loads as desktop, and each kind mints with its own client file (`GSC_OAUTH_CLIENT_FILE` for desktop, `GSC_OAUTH_WEB_CLIENT_FILE` for web). Without those two env vars the server behaves exactly as before and the login page answers `503` with the setup text. The CLI `login` command and the Desktop client file are unchanged.
+Open `https://mini.local/mcp/gsc/login/`, enter the shown code at Google's verification URL on any device already signed in to Google, and when the poll succeeds the page writes the token file (mode `0600`) and the running process adopts the refresh token immediately; tools work without a restart and the done page stops refreshing. `not_logged_in` messages then name the login page instead of the CLI. The token file gains a `client` field, `web` or `desktop`, the kind that minted it; a file without it loads as desktop, and each kind mints with its own client file (`GSC_OAUTH_CLIENT_FILE` for desktop, `GSC_OAUTH_WEB_CLIENT_FILE` for web). Without those two env vars the server behaves exactly as before and the login page answers `503` naming both. The CLI `login` command and the Desktop client file are unchanged.
