@@ -71,7 +71,7 @@ function session(child: ChildProcessWithoutNullStreams) {
   };
 }
 
-test('stdio tools/list names the nine catalog tools', async () => {
+test('stdio tools/list names the eight catalog tools', async () => {
   const child = serve();
   const client = session(child);
   try {
@@ -105,7 +105,6 @@ test('stdio tools/list names the nine catalog tools', async () => {
       'list_sites',
       'search_analytics',
       'inspect_url',
-      'request_inspection',
       'list_sitemaps',
       'add_site',
       'remove_site',

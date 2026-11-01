@@ -2,7 +2,7 @@
 
 ## Usage (caller's view)
 
-The caller is the Cursor agent, plus the person who logs in once. The agent does not import this package. It calls nine tools. The person runs login in a terminal, then Cursor starts the same program as a stdio server.
+The caller is the Cursor agent, plus the person who logs in once. The agent does not import this package. It calls eight tools. The person runs login in a terminal, then Cursor starts the same program as a stdio server.
 
 Create a Google Cloud desktop OAuth client, enable the Search Console API, and download the client JSON outside the repo. The consent screen uses only `https://www.googleapis.com/auth/webmasters`.
 
@@ -126,23 +126,6 @@ A token file that still stores `https://www.googleapis.com/auth/webmasters.reado
 }
 ```
 
-`request_inspection` asks Google to crawl and index one URL under the property. It takes the same `siteUrl`, `inspectionUrl`, and optional `languageCode` as `inspect_url`. Google accepts the request, which does not confirm a crawl. `inspectionResultLink` opens the request result in Search Console; `siteUrl` and `inspectionUrl` echo the request. The outcome appears after Google recrawls; read it with `inspect_url`.
-
-```json
-{
-  "siteUrl": "https://www.example.com/",
-  "inspectionUrl": "https://www.example.com/docs"
-}
-```
-
-```json
-{
-  "inspectionResultLink": "https://search.google.com/search-console/inspect",
-  "siteUrl": "https://www.example.com/",
-  "inspectionUrl": "https://www.example.com/docs"
-}
-```
-
 `list_sitemaps` lists sitemaps for one property. Pass `sitemapIndex`, the index URL, to list that index's children. Timestamps are Google's strings, or null when Google omits them. `type` and each contents `type` are Google's strings, copied through. `submit_sitemap` submits a sitemap and `remove_sitemap` deletes one.
 
 ```json
@@ -215,7 +198,7 @@ Other failures use the same JSON shape with `code` of `invalid_args`, `not_in_pr
 
 ## Serve over HTTPS
 
-`serve-http` exposes the same nine tools as one streamable HTTP endpoint, for hosts that connect by URL instead of spawning a process. `GSC_HTTP_PORT` picks the port (default 8097). The server binds `127.0.0.1` only and answers `403` to any other `Host` or `Origin`, so it is reached through a reverse proxy.
+`serve-http` exposes the same eight tools as one streamable HTTP endpoint, for hosts that connect by URL instead of spawning a process. `GSC_HTTP_PORT` picks the port (default 8097). The server binds `127.0.0.1` only and answers `403` to any other `Host` or `Origin`, so it is reached through a reverse proxy.
 
 ```text
 GSC_HTTP_PORT=8097 node dist/main.js serve-http
