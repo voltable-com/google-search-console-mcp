@@ -1,5 +1,7 @@
-import { McpServer, type CallToolResult } from '@modelcontextprotocol/server';
+import { createMcpHandler, McpServer, type CallToolResult } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
+import { hostHeaderValidation, originValidation, toNodeHandler, type NodeIncomingMessageLike } from '@modelcontextprotocol/node';
+import { createServer as createHttpServer } from 'node:http';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { toolCatalog, type Catalog, type ToolResult } from './console.js';
@@ -19,9 +21,40 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv): Pro
     serveStdio(createServer);
     return;
   }
+  if (command === 'serve-http') {
+    serveHttp(env);
+    return;
+  }
   console.error('Usage: node dist/main.js login');
   console.error('Usage: node dist/main.js serve');
+  console.error('Usage: GSC_HTTP_PORT=<port> node dist/main.js serve-http');
   process.exitCode = 2;
+}
+
+const DEFAULT_HTTP_PORT = 8097;
+
+// Served on loopback behind mini.local's nginx, which forwards Host $host and no Origin header.
+const ALLOWED_HOSTNAMES = ['mini.local', '127.0.0.1', 'localhost', '[::1]'];
+const ALLOWED_ORIGINS = ['mini.local'];
+
+function serveHttp(env: NodeJS.ProcessEnv): void {
+  const port = Number(env.GSC_HTTP_PORT ?? DEFAULT_HTTP_PORT);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    console.error(`GSC_HTTP_PORT must be a port number, got ${JSON.stringify(env.GSC_HTTP_PORT)}`);
+    process.exitCode = 2;
+    return;
+  }
+  const handler = createMcpHandler(() => createServer());
+  const nodeHandler = toNodeHandler(handler);
+  const validateHost = hostHeaderValidation(ALLOWED_HOSTNAMES);
+  const validateOrigin = originValidation(ALLOWED_ORIGINS);
+  createHttpServer((req, res) => {
+    if (!validateHost(req, res) || !validateOrigin(req, res)) return;
+    void nodeHandler(req as NodeIncomingMessageLike, res);
+  })
+    .listen(port, '127.0.0.1', () => {
+      console.error(`gsc-mcp http listening on 127.0.0.1:${port}`);
+    });
 }
 
 let processTokens: TokenSource | undefined;
