@@ -33,6 +33,9 @@ function tokens(first: string, refreshed = first): TokenSource {
     async refresh() {
       return { ok: true, token: accessToken(refreshed) };
     },
+    loginHint() {
+      return 'Run node dist/main.js login';
+    },
   };
 }
 

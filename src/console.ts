@@ -988,7 +988,7 @@ async function send(deps: ConsoleDeps, request: UnsignedRequest): Promise<ToolRe
     if (!secondToken.ok) return { ok: false, code: 'not_logged_in', message: secondToken.message };
     const second = await callHttp(http, signed(request, `Bearer ${secondToken.token}`));
     if (second !== null && second.status === 401) {
-      return { ok: false, code: 'not_logged_in', message: 'Run node dist/main.js login' };
+      return { ok: false, code: 'not_logged_in', message: deps.tokens.loginHint() };
     }
     return interpret(request.method, second);
   }

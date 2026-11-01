@@ -9,32 +9,45 @@ import { OAuth2Client } from 'google-auth-library';
 export const SCOPE = 'https://www.googleapis.com/auth/webmasters' as const;
 export const TOKEN_PARTIAL_SUFFIX = '.partial';
 const REFRESH_SKEW_MS = 60_000;
-const LOGIN_MESSAGE = 'Run node dist/main.js login';
+const CLI_LOGIN_MESSAGE = 'Run node dist/main.js login';
 const CLIENT_FILE_MESSAGE = 'Set GSC_OAUTH_CLIENT_FILE to a Desktop OAuth client JSON file.';
 const WEB_CLIENT_MESSAGE = 'GSC_OAUTH_CLIENT_FILE is a Web client. Create a Desktop client.';
 const INSTALLED_FIELDS_MESSAGE =
   'GSC_OAUTH_CLIENT_FILE must include installed.client_id and installed.client_secret.';
+const WEB_CLIENT_FILE_MESSAGE = 'Set GSC_OAUTH_WEB_CLIENT_FILE to a Web OAuth client JSON file.';
+const DESKTOP_CLIENT_MESSAGE = 'GSC_OAUTH_WEB_CLIENT_FILE is a Desktop client. Create a Web application client.';
+const WEB_FIELDS_MESSAGE = 'GSC_OAUTH_WEB_CLIENT_FILE must include web.client_id and web.client_secret.';
 
 declare const accessTokenBrand: unique symbol;
 export type AccessToken = string & { readonly [accessTokenBrand]: 'AccessToken' };
 
+export type ClientKind = 'web' | 'desktop';
+
 export type StoredToken = {
   refreshToken: string;
   scope: typeof SCOPE;
+  client?: ClientKind;
 };
 
 export type TokenResult = { ok: true; token: AccessToken } | { ok: false; message: string };
 
+export type Adopted = { refreshToken: string; clientId: string; clientSecret: string };
+
+export type AccessMint = (c: Adopted) => Promise<{ token: string; expiresAt: number } | { error: string }>;
+
 export type TokenSource = {
   accessToken(): Promise<TokenResult>;
   refresh(): Promise<TokenResult>;
+  loginHint(): string;
 };
+
+export type TokenStore = TokenSource & { adopt(c: Adopted): void };
 
 export type OAuthExchange = {
   start(redirectUri: string): Promise<{ refreshToken: string; grantedScope: string } | { error: string }>;
 };
 
-type DesktopClient =
+type ClientCredentials =
   | { ok: true; clientId: string; clientSecret: string }
   | { ok: false; message: string };
 
@@ -61,7 +74,15 @@ function isAccessToken(value: string): value is AccessToken {
   return value.length > 0;
 }
 
-function tokenFilePath(env: NodeJS.ProcessEnv): string {
+function loginMessage(env: NodeJS.ProcessEnv): string {
+  const redirect = env.GSC_LOGIN_REDIRECT_URL;
+  if (redirect === undefined || redirect === '') return CLI_LOGIN_MESSAGE;
+  // The registered callback .../login/callback is one segment below the sign-in page .../login/.
+  const page = redirect.endsWith('/callback') ? redirect.slice(0, -'callback'.length) : redirect;
+  return `Open ${page} in a browser to sign in`;
+}
+
+export function tokenFilePath(env: NodeJS.ProcessEnv): string {
   const override = env.GSC_TOKEN_FILE;
   if (override !== undefined && override !== '') return override;
   const home = env.HOME !== undefined && env.HOME !== '' ? env.HOME : homedir();
@@ -72,28 +93,32 @@ function ignoredPartialPath(tokenFile: string): string {
   return `${tokenFile}${TOKEN_PARTIAL_SUFFIX}`;
 }
 
-async function readStoredToken(file: string): Promise<StoredRead> {
+async function readStoredToken(file: string, hint: string): Promise<StoredRead> {
   let text: string;
   try {
     text = await readFile(file, 'utf8');
   } catch {
-    return { ok: false, message: LOGIN_MESSAGE };
+    return { ok: false, message: hint };
   }
   let json: unknown;
   try {
     const parsed: unknown = JSON.parse(text);
     json = parsed;
   } catch {
-    return { ok: false, message: LOGIN_MESSAGE };
+    return { ok: false, message: hint };
   }
-  if (!isRecord(json)) return { ok: false, message: LOGIN_MESSAGE };
+  if (!isRecord(json)) return { ok: false, message: hint };
   const refreshToken = json.refreshToken;
-  if (typeof refreshToken !== 'string' || refreshToken === '') return { ok: false, message: LOGIN_MESSAGE };
-  if (json.scope !== SCOPE) return { ok: false, message: LOGIN_MESSAGE };
-  return { ok: true, token: { refreshToken, scope: SCOPE } };
+  if (typeof refreshToken !== 'string' || refreshToken === '') return { ok: false, message: hint };
+  if (json.scope !== SCOPE) return { ok: false, message: hint };
+  if (json.client === undefined) return { ok: true, token: { refreshToken, scope: SCOPE } };
+  if (json.client === 'web' || json.client === 'desktop') {
+    return { ok: true, token: { refreshToken, scope: SCOPE, client: json.client } };
+  }
+  return { ok: false, message: hint };
 }
 
-async function readDesktopClient(file: string | undefined): Promise<DesktopClient> {
+async function readDesktopClient(file: string | undefined): Promise<ClientCredentials> {
   if (file === undefined || file === '') return { ok: false, message: CLIENT_FILE_MESSAGE };
   let text: string;
   try {
@@ -121,10 +146,45 @@ async function readDesktopClient(file: string | undefined): Promise<DesktopClien
   return { ok: true, clientId, clientSecret };
 }
 
-async function loadCredentials(tokenFile: string, clientFile: string | undefined): Promise<Loaded> {
-  const stored = await readStoredToken(tokenFile);
+export async function readWebClient(file: string | undefined): Promise<ClientCredentials> {
+  if (file === undefined || file === '') return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
+  let text: string;
+  try {
+    text = await readFile(file, 'utf8');
+  } catch {
+    return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
+  }
+  let json: unknown;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    json = parsed;
+  } catch {
+    return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
+  }
+  if (!isRecord(json)) return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
+  if (!isRecord(json.web)) {
+    if (isRecord(json.installed)) return { ok: false, message: DESKTOP_CLIENT_MESSAGE };
+    return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
+  }
+  const clientId = json.web.client_id;
+  const clientSecret = json.web.client_secret;
+  if (typeof clientId !== 'string' || clientId === '' || typeof clientSecret !== 'string' || clientSecret === '') {
+    return { ok: false, message: WEB_FIELDS_MESSAGE };
+  }
+  return { ok: true, clientId, clientSecret };
+}
+
+async function loadCredentials(
+  tokenFile: string,
+  clientFile: string | undefined,
+  webClientFile: string | undefined,
+  wantClient: ClientKind | undefined,
+  hint: string,
+): Promise<Loaded> {
+  const stored = await readStoredToken(tokenFile, hint);
   if (!stored.ok) return stored;
-  const client = await readDesktopClient(clientFile);
+  const kind = wantClient ?? stored.token.client ?? 'desktop';
+  const client = kind === 'web' ? await readWebClient(webClientFile) : await readDesktopClient(clientFile);
   if (!client.ok) return client;
   return {
     ok: true,
@@ -134,13 +194,13 @@ async function loadCredentials(tokenFile: string, clientFile: string | undefined
   };
 }
 
-async function publishStoredToken(file: string, token: StoredToken): Promise<void> {
+export async function publishToken(file: string, refreshToken: string, scope: typeof SCOPE, client: ClientKind): Promise<void> {
   const partial = ignoredPartialPath(file);
   await mkdir(dirname(file), { recursive: true });
   const handle = await open(partial, 'w', 0o600);
   try {
     await handle.chmod(0o600);
-    await handle.writeFile(JSON.stringify({ refreshToken: token.refreshToken, scope: token.scope }));
+    await handle.writeFile(JSON.stringify({ refreshToken, scope, client }));
     await handle.sync();
   } finally {
     await handle.close();
@@ -150,7 +210,7 @@ async function publishStoredToken(file: string, token: StoredToken): Promise<voi
 }
 
 // webmasters.readonly begins with the webmasters scope, so a substring check would accept it.
-function scopeGranted(granted: string): boolean {
+export function scopeGranted(granted: string): boolean {
   return granted.split(/\s+/).includes(SCOPE);
 }
 
@@ -161,7 +221,7 @@ async function publishGranted(file: string, refreshToken: string, granted: strin
     console.error(message);
     throw new Error(message);
   }
-  await publishStoredToken(file, { refreshToken, scope: SCOPE });
+  await publishToken(file, refreshToken, SCOPE, 'desktop');
   console.error('Logged in. Restart the server if it is already running.');
 }
 
@@ -259,7 +319,7 @@ function tryOpen(url: string): Promise<void> {
   });
 }
 
-async function loginWithGoogle(client: DesktopClient & { ok: true }, loopback: Loopback, tokenFile: string): Promise<void> {
+async function loginWithGoogle(client: ClientCredentials & { ok: true }, loopback: Loopback, tokenFile: string): Promise<void> {
   const oauth = new OAuth2Client({
     clientId: client.clientId,
     clientSecret: client.clientSecret,
@@ -292,31 +352,59 @@ async function loginWithGoogle(client: DesktopClient & { ok: true }, loopback: L
   await publishGranted(tokenFile, refreshToken, grantedScope ?? '');
 }
 
-export function openTokenStore(env: NodeJS.ProcessEnv): TokenSource {
-  const loaded = loadCredentials(tokenFilePath(env), env.GSC_OAUTH_CLIENT_FILE);
+const defaultAccessMint: AccessMint = async (c) => {
+  try {
+    const client = new OAuth2Client({ clientId: c.clientId, clientSecret: c.clientSecret });
+    client.setCredentials({ refresh_token: c.refreshToken });
+    const refreshed = await client.refreshAccessToken();
+    const access = refreshed.credentials.access_token;
+    if (typeof access !== 'string' || access === '') return { error: 'missing access token' };
+    const expiry = refreshed.credentials.expiry_date;
+    return { token: access, expiresAt: typeof expiry === 'number' ? expiry : Date.now() };
+  } catch {
+    return { error: 'refresh failed' };
+  }
+};
+
+export function openTokenStore(env: NodeJS.ProcessEnv, opts?: { mint?: AccessMint }): TokenStore {
+  const hint = loginMessage(env);
+  let credentials: Promise<Loaded> = loadCredentials(
+    tokenFilePath(env),
+    env.GSC_OAUTH_CLIENT_FILE,
+    env.GSC_OAUTH_WEB_CLIENT_FILE,
+    undefined,
+    hint,
+  );
+  const mintAccess = opts?.mint ?? defaultAccessMint;
   let cached: CachedAccess | null = null;
   let inflight: Promise<TokenResult> | null = null;
+  let generation = 0;
 
   async function mint(): Promise<TokenResult> {
-    const credentials = await loaded;
-    if (!credentials.ok) return { ok: false, message: credentials.message };
-    try {
-      const client = new OAuth2Client({
-        clientId: credentials.clientId,
-        clientSecret: credentials.clientSecret,
-      });
-      client.setCredentials({ refresh_token: credentials.refreshToken });
-      const refreshed = await client.refreshAccessToken();
-      const access = refreshed.credentials.access_token;
-      if (typeof access !== 'string' || !isAccessToken(access)) return { ok: false, message: LOGIN_MESSAGE };
-      const expiry = refreshed.credentials.expiry_date;
-      const expiresAt = typeof expiry === 'number' ? expiry : Date.now();
-      cached = { token: access, expiresAt };
-      return { ok: true, token: access };
-    } catch {
-      cached = null;
-      return { ok: false, message: LOGIN_MESSAGE };
+    const g = generation;
+    const loaded = await credentials;
+    if (!loaded.ok) return { ok: false, message: loaded.message };
+    const minted = await mintAccess({
+      refreshToken: loaded.refreshToken,
+      clientId: loaded.clientId,
+      clientSecret: loaded.clientSecret,
+    });
+    if ('error' in minted) {
+      if (g === generation) cached = null;
+      return { ok: false, message: hint };
     }
+    if (!isAccessToken(minted.token)) {
+      if (g === generation) cached = null;
+      return { ok: false, message: hint };
+    }
+    if (g === generation) cached = { token: minted.token, expiresAt: minted.expiresAt };
+    return { ok: true, token: minted.token };
+  }
+
+  function adopt(c: Adopted): void {
+    credentials = Promise.resolve({ ok: true, ...c });
+    cached = null;
+    generation += 1;
   }
 
   function refresh(): Promise<TokenResult> {
@@ -336,7 +424,7 @@ export function openTokenStore(env: NodeJS.ProcessEnv): TokenSource {
     return refresh();
   }
 
-  return { accessToken, refresh };
+  return { accessToken, refresh, adopt, loginHint: () => hint };
 }
 
 export async function login(env: NodeJS.ProcessEnv, oauth?: OAuthExchange): Promise<void> {
