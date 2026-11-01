@@ -7,3 +7,4 @@ client.json
 token.json
 credentials.json
 client_secret*.json
+.cursor/mcp.json

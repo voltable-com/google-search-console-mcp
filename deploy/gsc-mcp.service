@@ -1,14 +1,16 @@
+# Template. Set User, GSC_OAUTH_CLIENT_FILE, GSC_ALLOWED_HOSTS, and GSC_LOGIN_URL for your host.
 [Unit]
 Description=GSC MCP server (Search Console, streamable HTTP)
 After=network.target
 
 [Service]
 Type=simple
-User=toni
+User=gsc-mcp
 WorkingDirectory=/srv/gsc-mcp
-Environment=GSC_OAUTH_CLIENT_FILE=/home/toni/.config/gsc-mcp/client.json
-Environment=GSC_LOGIN_URL=https://mini.local/mcp/gsc/login/
+Environment=GSC_OAUTH_CLIENT_FILE=/etc/gsc-mcp/client.json
+Environment=GSC_LOGIN_URL=https://your-host.example/mcp/gsc/login/
 Environment=GSC_HTTP_PORT=8097
+Environment=GSC_ALLOWED_HOSTS=your-host.example
 ExecStart=/usr/bin/node /srv/gsc-mcp/dist/main.js serve-http
 Restart=on-failure
 RestartSec=3

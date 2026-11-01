@@ -34,9 +34,9 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv): Pro
 
 const DEFAULT_HTTP_PORT = 8097;
 
-// Served on loopback behind mini.local's nginx, which forwards Host $host and no Origin header.
-const ALLOWED_HOSTNAMES = ['mini.local', '127.0.0.1', 'localhost', '[::1]'];
-const ALLOWED_ORIGINS = ['mini.local'];
+// Loopback is always served; GSC_ALLOWED_HOSTS adds the reverse-proxied hostname(s)
+// whose Host/Origin the guards accept, forwarded verbatim by nginx.
+const LOOPBACK_HOSTNAMES = ['127.0.0.1', 'localhost', '[::1]'];
 
 function serveHttp(env: NodeJS.ProcessEnv): void {
   const port = Number(env.GSC_HTTP_PORT ?? DEFAULT_HTTP_PORT);
@@ -50,8 +50,9 @@ function serveHttp(env: NodeJS.ProcessEnv): void {
   const webLogin = openWebLogin({ env, store: tokens });
   const handler = createMcpHandler(() => createServer());
   const nodeHandler = toNodeHandler(handler);
-  const validateHost = hostHeaderValidation(ALLOWED_HOSTNAMES);
-  const validateOrigin = originValidation(ALLOWED_ORIGINS);
+  const allowedHosts = (env.GSC_ALLOWED_HOSTS ?? '').split(',').map((host) => host.trim()).filter((host) => host !== '');
+  const validateHost = hostHeaderValidation([...LOOPBACK_HOSTNAMES, ...allowedHosts]);
+  const validateOrigin = originValidation(allowedHosts);
   createHttpServer((req, res) => {
     if (!validateHost(req, res) || !validateOrigin(req, res)) return;
     void webLogin.tryHandle(req, res).then((handled) => {

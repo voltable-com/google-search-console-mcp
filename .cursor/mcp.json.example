@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "gsc": {
+      "command": "node",
+      "args": ["dist/main.js", "serve"],
+      "env": {
+        "GSC_OAUTH_CLIENT_FILE": "/path/to/client.json"
+      }
+    }
+  }
+}

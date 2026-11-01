@@ -1,0 +1,10 @@
+{
+  "installed": {
+    "client_id": "000000000000-REPLACEME000000000000000000.apps.googleusercontent.com",
+    "project_id": "REPLACE-WITH-YOUR-PROJECT",
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "client_secret": "REPLACE-WITH-YOUR-CLIENT-SECRET",
+    "redirect_uris": ["http://127.0.0.1:41799/"]
+  }
+}

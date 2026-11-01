@@ -123,6 +123,7 @@ test('serve-http answers tools/list with the catalog names and rejects rebinding
     assert.equal(await getWithHost('/login/', '127.0.0.1'), 503);
     assert.equal(await getWithHost('/login/', 'evil.example'), 403);
     assert.equal(await getWithHost('/mcp/gsc/login/', 'evil.example'), 403);
+    assert.equal(await getWithHost('/login/', 'mini.local'), 403);
   } finally {
     child.kill();
   }
@@ -131,7 +132,7 @@ test('serve-http answers tools/list with the catalog names and rejects rebinding
 test('serve-http answers the unconfigured login page with 503 while MCP routes stay mounted', async () => {
   const child = spawn(process.execPath, ['dist/main.js', 'serve-http'], {
     cwd: root,
-    env: { GSC_HTTP_PORT: String(loginPort) },
+    env: { GSC_HTTP_PORT: String(loginPort), GSC_ALLOWED_HOSTS: 'lan.example' },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   try {
@@ -166,6 +167,7 @@ test('serve-http answers the unconfigured login page with 503 while MCP routes s
 
     assert.equal(await getWithHost('/login/', 'evil.example', loginPort), 403);
     assert.equal(await postLoginWithHost('evil.example', loginPort), 403);
+    assert.equal(await getWithHost('/login/', 'lan.example', loginPort), 503);
   } finally {
     child.kill();
   }

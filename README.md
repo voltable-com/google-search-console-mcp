@@ -4,9 +4,9 @@
 
 The caller is the Cursor agent, plus the person who logs in once. The agent does not import this package. It calls eight tools. The person runs login in a terminal, then Cursor starts the same program as a stdio server.
 
-Create a Google Cloud desktop OAuth client, enable the Search Console API, and download the client JSON outside the repo. The consent screen uses only `https://www.googleapis.com/auth/webmasters`.
+Create a Google Cloud desktop OAuth client, enable the Search Console API, and download the client JSON outside the repo. `client.example.json` shows the shape `GSC_OAUTH_CLIENT_FILE` expects. The consent screen uses only `https://www.googleapis.com/auth/webmasters`.
 
-`GSC_OAUTH_CLIENT_FILE` points at that JSON. The token file defaults to `~/.local/share/gsc-mcp/token.json`. `GSC_TOKEN_FILE` overrides the token path. Neither file lives in the repo. `.cursor/mcp.json` holds the path, not the secret.
+`GSC_OAUTH_CLIENT_FILE` points at that JSON. The token file defaults to `~/.local/share/gsc-mcp/token.json`. `GSC_TOKEN_FILE` overrides the token path. Neither file lives in the repo. `.cursor/mcp.json` holds the path, not the secret. Copy `.cursor/mcp.json.example` and `.env.example` as starting points; `client.json`, `token.json`, and `.cursor/mcp.json` are gitignored.
 
 ```json
 {
@@ -15,7 +15,7 @@ Create a Google Cloud desktop OAuth client, enable the Search Console API, and d
       "command": "node",
       "args": ["dist/main.js", "serve"],
       "env": {
-        "GSC_OAUTH_CLIENT_FILE": "/home/toni/.config/gsc-mcp/client.json"
+        "GSC_OAUTH_CLIENT_FILE": "/path/to/client.json"
       }
     }
   }
@@ -198,22 +198,23 @@ Other failures use the same JSON shape with `code` of `invalid_args`, `not_in_pr
 
 ## Serve over HTTPS
 
-`serve-http` exposes the same eight tools as one streamable HTTP endpoint, for hosts that connect by URL instead of spawning a process. `GSC_HTTP_PORT` picks the port (default 8097). The server binds `127.0.0.1` only and answers `403` to any other `Host` or `Origin`, so it is reached through a reverse proxy.
+`serve-http` exposes the same eight tools as one streamable HTTP endpoint, for hosts that connect by URL instead of spawning a process. `GSC_HTTP_PORT` picks the port (default 8097). The server binds `127.0.0.1` only and answers `403` to any `Host` or `Origin` outside loopback and the comma-separated `GSC_ALLOWED_HOSTS`, so it is reached through a reverse proxy that forwards one of those hostnames.
 
 ```text
 GSC_HTTP_PORT=8097 node dist/main.js serve-http
 ```
 
-On mini.local the build lives in `/srv/gsc-mcp` and systemd runs it as `gsc-mcp.service` (`deploy/gsc-mcp.service`). nginx serves it at `https://mini.local/mcp/gsc/`. The client JSON and token file sit in `toni`'s home there. Google refresh tokens go stale; rerun `login` on the workstation and copy `token.json` over, then restart the service, because the process reads the token file once at startup. Or sign in from the browser, described next, and no restart is needed.
+The repo ships `deploy/gsc-mcp.service` as a template for running `serve-http` under systemd from `/srv/gsc-mcp`, reached through a reverse proxy that maps a public hostname to the loopback port. Set `User`, `GSC_OAUTH_CLIENT_FILE`, and `GSC_LOGIN_URL` for your host, and keep the client JSON and token file outside the repo with mode `0600`. Google refresh tokens go stale; rerun `login` on the workstation and copy `token.json` over, then restart the service, because the process reads the token file once at startup. Or sign in from the browser, described next, and no restart is needed.
 
 ### Browser login (server)
 
-`serve-http` can complete Google sign-in in any browser instead of the workstation CLI using a **paste-back** redirect login. The login client is the same installed `GSC_OAUTH_CLIENT_FILE` the CLI uses: installed clients accept a loopback redirect on any port, and Google only requires the token exchange's `redirect_uri` to match the authorize one byte-for-byte, so nobody has to listen on that port. Google Cloud Console rejects `*.local` redirect URIs and mini has no public hostname, so the authorize link ends on `http://127.0.0.1:41799/`, an address nothing binds: after consent the browser tab shows a connection-error page, and the user copies the full address from the bar and pastes it into the login form.
+`serve-http` can complete Google sign-in in any browser instead of the workstation CLI using a **paste-back** redirect login. The login client is the same installed `GSC_OAUTH_CLIENT_FILE` the CLI uses: installed clients accept a loopback redirect on any port, and Google only requires the token exchange's `redirect_uri` to match the authorize one byte-for-byte, so nobody has to listen on that port. Google Cloud Console rejects `*.local` redirect URIs and a private deploy host has no public hostname, so the authorize link ends on `http://127.0.0.1:41799/`, an address nothing binds: after consent the browser tab shows a connection-error page, and the user copies the full address from the bar and pastes it into the login form.
 
 ```text
-GSC_OAUTH_CLIENT_FILE=/home/toni/.config/gsc-mcp/client.json   # the installed client, loopback redirects need no registration
-GSC_LOGIN_URL=https://mini.local/mcp/gsc/login/                # this page's public URL
+GSC_OAUTH_CLIENT_FILE=~/.config/gsc-mcp/client.json    # the installed client, loopback redirects need no registration
+GSC_ALLOWED_HOSTS=your-host.example                    # Host/Origin guard, on top of loopback
+GSC_LOGIN_URL=https://your-host.example/mcp/gsc/login/ # this page's public URL
 node dist/main.js serve-http
 ```
 
-Open `https://mini.local/mcp/gsc/login/`, follow the sign-in link and sign in; the browser lands on an error page, by design. Copy the FULL address from the bar, paste it into the form and submit. The server checks the pasted address against the pending state, exchanges the code with `redirect_uri=http://127.0.0.1:41799/`, and on success writes the token file (mode `0600`) and the running process adopts the refresh token immediately; tools work without a restart. `not_logged_in` messages then name the login page instead of the CLI. The token file keeps the `client` field naming the kind that minted it; browser login mints `desktop`, like the CLI, and a file without it loads as desktop. Without `GSC_LOGIN_URL` or a readable `GSC_OAUTH_CLIENT_FILE` the server behaves exactly as before and the login page answers `503` naming both. The CLI `login` command is unchanged.
+Open the `GSC_LOGIN_URL` login page, follow the sign-in link and sign in; the browser lands on an error page, by design. Copy the FULL address from the bar, paste it into the form and submit. The server checks the pasted address against the pending state, exchanges the code with `redirect_uri=http://127.0.0.1:41799/`, and on success writes the token file (mode `0600`) and the running process adopts the refresh token immediately; tools work without a restart. `not_logged_in` messages then name the login page instead of the CLI. The token file keeps the `client` field naming the kind that minted it; browser login mints `desktop`, like the CLI, and a file without it loads as desktop. Without `GSC_LOGIN_URL` or a readable `GSC_OAUTH_CLIENT_FILE` the server behaves exactly as before and the login page answers `503` naming both. The CLI `login` command is unchanged.
