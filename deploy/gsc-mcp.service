@@ -7,6 +7,8 @@ Type=simple
 User=toni
 WorkingDirectory=/srv/gsc-mcp
 Environment=GSC_OAUTH_CLIENT_FILE=/home/toni/.config/gsc-mcp/client.json
+Environment=GSC_OAUTH_WEB_CLIENT_FILE=/home/toni/.config/gsc-mcp/client-web.json
+Environment=GSC_LOGIN_REDIRECT_URL=https://mini.local/mcp/gsc/login/callback
 Environment=GSC_HTTP_PORT=8097
 ExecStart=/usr/bin/node /srv/gsc-mcp/dist/main.js serve-http
 Restart=on-failure

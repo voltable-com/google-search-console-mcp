@@ -204,4 +204,16 @@ Other failures use the same JSON shape with `code` of `invalid_args`, `not_in_pr
 GSC_HTTP_PORT=8097 node dist/main.js serve-http
 ```
 
-On mini.local the build lives in `/srv/gsc-mcp` and systemd runs it as `gsc-mcp.service` (`deploy/gsc-mcp.service`). nginx serves it at `https://mini.local/mcp/gsc/`. The client JSON and token file sit in `toni`'s home there. Google refresh tokens go stale; rerun `login` on the workstation and copy `token.json` over, then restart the service, because the process reads the token file once at startup.
+On mini.local the build lives in `/srv/gsc-mcp` and systemd runs it as `gsc-mcp.service` (`deploy/gsc-mcp.service`). nginx serves it at `https://mini.local/mcp/gsc/`. The client JSON and token file sit in `toni`'s home there. Google refresh tokens go stale; rerun `login` on the workstation and copy `token.json` over, then restart the service, because the process reads the token file once at startup. Or sign in from the browser, described next, and no restart is needed.
+
+### Browser login (server)
+
+`serve-http` can complete Google sign-in in any browser instead of the workstation CLI. In Google Cloud Console create a **Web application** OAuth client (Desktop clients reject non-loopback redirects) and register the authorized redirect URI byte-for-byte as `GSC_LOGIN_REDIRECT_URL`.
+
+```text
+GSC_OAUTH_WEB_CLIENT_FILE=/home/toni/.config/gsc-mcp/client-web.json   # Google's unmodified {"web":{...}} download
+GSC_LOGIN_REDIRECT_URL=https://mini.local/mcp/gsc/login/callback       # the exact registered redirect
+node dist/main.js serve-http
+```
+
+Open `https://mini.local/mcp/gsc/login/` in a browser; it redirects to Google, and after consent `GET .../login/callback` writes the token file (mode `0600`) and the running process adopts the refresh token immediately. Tools work without a restart. `not_logged_in` messages then name the login page instead of the CLI. The token file gains a `client` field, `web` or `desktop`, the kind that minted it; a file without it loads as desktop, and each kind mints with its own client file (`GSC_OAUTH_CLIENT_FILE` for desktop, `GSC_OAUTH_WEB_CLIENT_FILE` for web). Without those two env vars the server behaves exactly as before and the login page answers `503` with the setup text. The CLI `login` command and the Desktop client file are unchanged.
