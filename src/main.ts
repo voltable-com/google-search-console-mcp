@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { toolCatalog, type Catalog, type ToolResult } from './console.js';
 import { login, openTokenStore, type TokenSource } from './token.js';
+import { openWebLogin } from './weblogin.js';
 
 export async function main(argv: readonly string[], env: NodeJS.ProcessEnv): Promise<void> {
   const command = argv[2];
@@ -44,13 +45,18 @@ function serveHttp(env: NodeJS.ProcessEnv): void {
     process.exitCode = 2;
     return;
   }
+  const tokens = openTokenStore(env);
+  processTokens = tokens;
+  const webLogin = openWebLogin({ env, store: tokens });
   const handler = createMcpHandler(() => createServer());
   const nodeHandler = toNodeHandler(handler);
   const validateHost = hostHeaderValidation(ALLOWED_HOSTNAMES);
   const validateOrigin = originValidation(ALLOWED_ORIGINS);
   createHttpServer((req, res) => {
     if (!validateHost(req, res) || !validateOrigin(req, res)) return;
-    void nodeHandler(req as NodeIncomingMessageLike, res);
+    void webLogin.tryHandle(req, res).then((handled) => {
+      if (!handled) void nodeHandler(req as NodeIncomingMessageLike, res);
+    });
   })
     .listen(port, '127.0.0.1', () => {
       console.error(`gsc-mcp http listening on 127.0.0.1:${port}`);
