@@ -251,6 +251,55 @@ test('not_in_property does not call HTTP', async () => {
   assert.equal(calls.length, 0);
 });
 
+test('request_inspection posts the request and echoes the link', async () => {
+  const link = JSON.stringify({
+    inspectionResultLink: 'https://search.google.com/search-console/inspect?resource_id=sc-domain:example.com',
+    siteUrl: SITE,
+    inspectionUrl: 'https://www.example.com/docs',
+  });
+  const { calls, catalog } = harness(() => ({ status: 200, text: link }));
+  const requested = await catalog.request_inspection.run({
+    siteUrl: SITE,
+    inspectionUrl: 'https://www.example.com/docs',
+  });
+  assert.equal(requested.ok, true, JSON.stringify(requested));
+  if (requested.ok) {
+    assert.deepEqual(requested.value, {
+      inspectionResultLink: 'https://search.google.com/search-console/inspect?resource_id=sc-domain:example.com',
+      siteUrl: SITE,
+      inspectionUrl: 'https://www.example.com/docs',
+    });
+  }
+  const first = calls[0];
+  if (first === undefined || first.method !== 'POST') {
+    assert.fail(`expected a POST call, got ${JSON.stringify(calls)}`);
+  }
+  assert.equal(first.url, 'https://searchconsole.googleapis.com/url/v1/inspection:requestInspection');
+  assert.deepEqual(first.body, { siteUrl: SITE, inspectionUrl: 'https://www.example.com/docs' });
+  const withLanguage = await catalog.request_inspection.run({
+    siteUrl: DOMAIN,
+    inspectionUrl: 'https://www.example.com/docs',
+    languageCode: 'de',
+  });
+  assert.equal(withLanguage.ok, true, JSON.stringify(withLanguage));
+  const second = calls[1];
+  if (second === undefined || second.method !== 'POST') {
+    assert.fail(`expected a second POST call, got ${JSON.stringify(calls)}`);
+  }
+  assert.equal(second.body.languageCode, 'de');
+  const outside = await catalog.request_inspection.run({ siteUrl: SITE, inspectionUrl: 'https://other.example/docs' });
+  assert.equal(outside.ok, false);
+  if (!outside.ok) assert.equal(outside.code, 'not_in_property');
+  const extra = await catalog.request_inspection.run({
+    siteUrl: SITE,
+    inspectionUrl: 'https://www.example.com/docs',
+    confirm: true,
+  });
+  assert.equal(extra.ok, false);
+  if (!extra.ok) assert.equal(extra.code, 'invalid_args');
+  assert.equal(calls.length, 2);
+});
+
 test('inspection caps referring URLs, sitemaps, AMP issues, and rich items at 20 and reports the full counts', async () => {
   const referring = many('https://ref.example', 21);
   const sitemaps = many('https://sitemap.example', 21);

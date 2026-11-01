@@ -43,6 +43,7 @@ const FILTER_EXPRESSION_MAX = 4096;
 const ERROR_MESSAGE_LIMIT = 200;
 const SITES_URL = 'https://www.googleapis.com/webmasters/v3/sites';
 const INSPECT_URL = 'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect';
+const REQUEST_INSPECTION_URL = 'https://searchconsole.googleapis.com/url/v1/inspection:requestInspection';
 
 const SITE_URL_PATTERN = /^(https?:\/\/\S+\/|sc-domain:[^\s/]+)$/;
 
@@ -54,6 +55,9 @@ const SEARCH_ANALYTICS_DESCRIPTION =
 
 const INSPECT_URL_DESCRIPTION =
   '`inspect_url` reports the indexed URL. It does not fetch the live page. `inspectionUrl` is an absolute `http` or `https` URL under the property. `languageCode` is an optional BCP-47 tag. When it is omitted, the request omits it and Google uses `en-US`. `verdict` of `PASS` means valid, `FAIL` means error, and `NEUTRAL` means excluded. `coverageState` is Google\'s text, copied through. `referringUrls`, `sitemaps`, AMP `issues`, and rich-result `items` each keep Google\'s order and hold at most 20 entries. `referringUrlCount`, `sitemapCount`, `issueCount`, and `itemCount` are the full counts before those caps. The counts are not fields on `UrlInspectionResult`. `amp` is null when Google omits `ampResult`. Otherwise it carries `verdict`, `ampUrl`, `robotsTxtState`, `indexingState`, `ampIndexStatusVerdict`, `lastCrawlTime`, `pageFetchState`, `issues` of `message` plus `severity`, and `issueCount`. The result has no mobile usability object.';
+
+const REQUEST_INSPECTION_DESCRIPTION =
+  '`request_inspection` asks Google to crawl and index one URL under the property. It takes the same `siteUrl`, `inspectionUrl`, and optional `languageCode` as `inspect_url`. Google accepts the request, which does not confirm a crawl. `inspectionResultLink` opens the request result in Search Console; `siteUrl` and `inspectionUrl` echo the request. The outcome appears after Google recrawls; read it with `inspect_url`.';
 
 const LIST_SITEMAPS_DESCRIPTION =
   '`list_sitemaps` lists sitemaps for one property. Pass `sitemapIndex`, the index URL, to list that index\'s children. Timestamps are Google\'s strings, or null when Google omits them. `type` and each contents `type` are Google\'s strings, copied through. `submit_sitemap` submits a sitemap and `remove_sitemap` deletes one.';
@@ -140,6 +144,12 @@ export type Inspection = {
   richResults: { verdict: string; items: readonly RichResultItem[]; itemCount: number } | null;
 };
 
+export type RequestedInspection = {
+  inspectionResultLink: string;
+  siteUrl: SiteUrl;
+  inspectionUrl: InspectionUrl;
+};
+
 export type SitemapContent = { type: string; submitted: number; indexed: number };
 
 export type Sitemap = {
@@ -192,6 +202,7 @@ export type Catalog = {
   list_sites: Tool<SiteList>;
   search_analytics: Tool<AnalyticsPage>;
   inspect_url: Tool<Inspection>;
+  request_inspection: Tool<RequestedInspection>;
   list_sitemaps: Tool<SitemapList>;
   add_site: Tool<AddedSite>;
   remove_site: Tool<RemovedSite>;
@@ -783,7 +794,9 @@ function parseInspection(json: unknown): ToolResult<Inspection> {
   };
 }
 
-async function queryInspection(deps: ConsoleDeps, raw: unknown): Promise<ToolResult<Inspection>> {
+function parseInspectionArgs(
+  raw: unknown,
+): ToolResult<{ siteUrl: SiteUrl; inspectionUrl: InspectionUrl; languageCode?: string }> {
   const parsed = inspectUrlSchema.safeParse(raw);
   if (!parsed.success) return invalidArgs(issueMessage(parsed.error.issues));
   const siteUrl = isSiteUrl(parsed.data.siteUrl) ? parsed.data.siteUrl : null;
@@ -798,11 +811,36 @@ async function queryInspection(deps: ConsoleDeps, raw: unknown): Promise<ToolRes
       message: 'inspectionUrl is not under siteUrl. Pass a siteUrl from list_sites.',
     };
   }
-  const body: { inspectionUrl: InspectionUrl; siteUrl: SiteUrl; languageCode?: string } = { inspectionUrl, siteUrl };
-  if (parsed.data.languageCode !== undefined) body.languageCode = parsed.data.languageCode;
+  if (parsed.data.languageCode === undefined) return { ok: true, value: { siteUrl, inspectionUrl } };
+  return { ok: true, value: { siteUrl, inspectionUrl, languageCode: parsed.data.languageCode } };
+}
+
+async function queryInspection(deps: ConsoleDeps, raw: unknown): Promise<ToolResult<Inspection>> {
+  const args = parseInspectionArgs(raw);
+  if (!args.ok) return args;
+  const body: { inspectionUrl: InspectionUrl; siteUrl: SiteUrl; languageCode?: string } = { ...args.value };
   const sent = await send(deps, { method: 'POST', url: INSPECT_URL, body });
   if (!sent.ok) return sent;
   return parseInspection(sent.value);
+}
+
+function parseRequestedInspection(json: unknown): ToolResult<RequestedInspection> {
+  if (!isRecord(json)) return badResponse();
+  const inspectionResultLink = requiredString(json, 'inspectionResultLink');
+  const siteUrl = requiredString(json, 'siteUrl');
+  const inspectionUrl = requiredString(json, 'inspectionUrl');
+  if (inspectionResultLink === null || siteUrl === null || inspectionUrl === null) return badResponse();
+  if (!isSiteUrl(siteUrl) || !isInspectionUrl(inspectionUrl)) return badResponse();
+  return { ok: true, value: { inspectionResultLink, siteUrl, inspectionUrl } };
+}
+
+async function requestInspection(deps: ConsoleDeps, raw: unknown): Promise<ToolResult<RequestedInspection>> {
+  const args = parseInspectionArgs(raw);
+  if (!args.ok) return args;
+  const body: { inspectionUrl: InspectionUrl; siteUrl: SiteUrl; languageCode?: string } = { ...args.value };
+  const sent = await send(deps, { method: 'POST', url: REQUEST_INSPECTION_URL, body });
+  if (!sent.ok) return sent;
+  return parseRequestedInspection(sent.value);
 }
 
 function sitemapsUrl(site: SiteUrl, sitemapIndex: string | undefined): string {
@@ -1110,6 +1148,13 @@ export function toolCatalog(deps: ConsoleDeps): Catalog {
       inputSchema: inspectUrlSchema,
       run(args: unknown) {
         return queryInspection(deps, args);
+      },
+    },
+    request_inspection: {
+      description: REQUEST_INSPECTION_DESCRIPTION,
+      inputSchema: inspectUrlSchema,
+      run(args: unknown) {
+        return requestInspection(deps, args);
       },
     },
     list_sitemaps: {

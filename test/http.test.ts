@@ -114,7 +114,7 @@ test('serve-http answers tools/list with the catalog names and rejects rebinding
     const listBody = (await jsonBody(list)) as { result?: { tools?: { name: string }[] } };
     assert.deepEqual(
       listBody.result?.tools?.map((tool) => tool.name),
-      ['list_sites', 'search_analytics', 'inspect_url', 'list_sitemaps', 'add_site', 'remove_site', 'submit_sitemap', 'remove_sitemap'],
+      ['list_sites', 'search_analytics', 'inspect_url', 'request_inspection', 'list_sitemaps', 'add_site', 'remove_site', 'submit_sitemap', 'remove_sitemap'],
     );
 
     const rebinding = await postWithHost('evil.example');
