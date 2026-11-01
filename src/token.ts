@@ -14,9 +14,9 @@ const CLIENT_FILE_MESSAGE = 'Set GSC_OAUTH_CLIENT_FILE to a Desktop OAuth client
 const WEB_CLIENT_MESSAGE = 'GSC_OAUTH_CLIENT_FILE is a Web client. Create a Desktop client.';
 const INSTALLED_FIELDS_MESSAGE =
   'GSC_OAUTH_CLIENT_FILE must include installed.client_id and installed.client_secret.';
-const WEB_CLIENT_FILE_MESSAGE = 'Set GSC_OAUTH_WEB_CLIENT_FILE to a Web OAuth client JSON file.';
-const DESKTOP_CLIENT_MESSAGE = 'GSC_OAUTH_WEB_CLIENT_FILE is a Desktop client. Create a Web application client.';
-const WEB_FIELDS_MESSAGE = 'GSC_OAUTH_WEB_CLIENT_FILE must include web.client_id and web.client_secret.';
+const WEB_CLIENT_FILE_MESSAGE = 'Set GSC_OAUTH_WEB_CLIENT_FILE to the downloaded Google OAuth client JSON file.';
+const WEB_FIELDS_MESSAGE = 'GSC_OAUTH_WEB_CLIENT_FILE must include client_id and client_secret.';
+const DEFAULT_TOKEN_URI = 'https://oauth2.googleapis.com/token';
 
 declare const accessTokenBrand: unique symbol;
 export type AccessToken = string & { readonly [accessTokenBrand]: 'AccessToken' };
@@ -51,6 +51,10 @@ type ClientCredentials =
   | { ok: true; clientId: string; clientSecret: string }
   | { ok: false; message: string };
 
+export type WebClientCredentials =
+  | { ok: true; clientId: string; clientSecret: string; tokenUri: string }
+  | { ok: false; message: string };
+
 type StoredRead = { ok: true; token: StoredToken } | { ok: false; message: string };
 
 type Loaded =
@@ -75,10 +79,8 @@ function isAccessToken(value: string): value is AccessToken {
 }
 
 function loginMessage(env: NodeJS.ProcessEnv): string {
-  const redirect = env.GSC_LOGIN_REDIRECT_URL;
-  if (redirect === undefined || redirect === '') return CLI_LOGIN_MESSAGE;
-  // The registered callback .../login/callback is one segment below the sign-in page .../login/.
-  const page = redirect.endsWith('/callback') ? redirect.slice(0, -'callback'.length) : redirect;
+  const page = env.GSC_LOGIN_URL;
+  if (page === undefined || page === '') return CLI_LOGIN_MESSAGE;
   return `Open ${page} in a browser to sign in`;
 }
 
@@ -146,7 +148,7 @@ async function readDesktopClient(file: string | undefined): Promise<ClientCreden
   return { ok: true, clientId, clientSecret };
 }
 
-export async function readWebClient(file: string | undefined): Promise<ClientCredentials> {
+export async function readWebClient(file: string | undefined): Promise<WebClientCredentials> {
   if (file === undefined || file === '') return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
   let text: string;
   try {
@@ -162,16 +164,15 @@ export async function readWebClient(file: string | undefined): Promise<ClientCre
     return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
   }
   if (!isRecord(json)) return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
-  if (!isRecord(json.web)) {
-    if (isRecord(json.installed)) return { ok: false, message: DESKTOP_CLIENT_MESSAGE };
-    return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
-  }
-  const clientId = json.web.client_id;
-  const clientSecret = json.web.client_secret;
+  const wrapper = isRecord(json.installed) ? json.installed : isRecord(json.web) ? json.web : null;
+  if (wrapper === null) return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
+  const clientId = wrapper.client_id;
+  const clientSecret = wrapper.client_secret;
   if (typeof clientId !== 'string' || clientId === '' || typeof clientSecret !== 'string' || clientSecret === '') {
     return { ok: false, message: WEB_FIELDS_MESSAGE };
   }
-  return { ok: true, clientId, clientSecret };
+  const tokenUri = typeof wrapper.token_uri === 'string' && wrapper.token_uri !== '' ? wrapper.token_uri : DEFAULT_TOKEN_URI;
+  return { ok: true, clientId, clientSecret, tokenUri };
 }
 
 async function loadCredentials(

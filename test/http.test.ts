@@ -1,10 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { request } from 'node:http';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -105,31 +102,27 @@ test('serve-http answers tools/list with the catalog names and rejects rebinding
 
     assert.equal(await getWithHost('/login/', '127.0.0.1'), 503);
     assert.equal(await getWithHost('/login/', 'evil.example'), 403);
-    assert.equal(await getWithHost('/mcp/gsc/login/callback?state=x', 'evil.example'), 403);
+    assert.equal(await getWithHost('/mcp/gsc/login/', 'evil.example'), 403);
   } finally {
     child.kill();
   }
 });
 
-test('serve-http redirects login pages to Google while MCP routes stay mounted', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'gsc-http-'));
-  const webClientFile = join(dir, 'client-web.json');
-  await writeFile(webClientFile, JSON.stringify({ web: { client_id: 'web-id', client_secret: 'web-secret' } }));
+test('serve-http answers the unconfigured login page with 503 while MCP routes stay mounted', async () => {
   const child = spawn(process.execPath, ['dist/main.js', 'serve-http'], {
     cwd: root,
-    env: {
-      GSC_HTTP_PORT: String(loginPort),
-      GSC_OAUTH_WEB_CLIENT_FILE: webClientFile,
-      GSC_LOGIN_REDIRECT_URL: 'https://mini.local/mcp/gsc/login/callback',
-    },
+    env: { GSC_HTTP_PORT: String(loginPort) },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   try {
     await waitForServer(child);
 
-    const signin = await fetch(`http://127.0.0.1:${loginPort}/mcp/gsc/login/`, { redirect: 'manual' });
-    assert.equal(signin.status, 302);
-    assert.match(signin.headers.get('location') ?? '', /^https:\/\/accounts\.google\.com\/.*client_id=web-id/);
+    const signin = await fetch(`http://127.0.0.1:${loginPort}/mcp/gsc/login/`);
+    assert.equal(signin.status, 503);
+    assert.equal(signin.headers.get('cache-control'), 'no-store');
+    const text = await signin.text();
+    assert.match(text, /GSC_OAUTH_WEB_CLIENT_FILE/);
+    assert.match(text, /GSC_LOGIN_URL/);
 
     const init = await rpc(
       {
@@ -145,6 +138,5 @@ test('serve-http redirects login pages to Google while MCP routes stay mounted',
     assert.equal(await getWithHost('/login/', 'evil.example', loginPort), 403);
   } finally {
     child.kill();
-    await rm(dir, { recursive: true, force: true });
   }
 });

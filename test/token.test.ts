@@ -179,20 +179,29 @@ test('a web client token file without a web client file names the web env var an
   }
 });
 
-test('a web client token file mints with the web client credentials', async () => {
+test('a web client token file mints with the web client credentials from either client shape', async () => {
   const { dir, env, tokenFile } = await tempEnv();
   try {
-    const webClientFile = join(dir, 'client-web.json');
-    await writeFile(webClientFile, JSON.stringify({ web: { client_id: 'web-id', client_secret: 'web-secret' } }));
+    const installedFile = join(dir, 'client-web-installed.json');
+    const webFile = join(dir, 'client-web.json');
+    await writeFile(installedFile, JSON.stringify({ installed: { client_id: 'web-id', client_secret: 'web-secret' } }));
+    await writeFile(webFile, JSON.stringify({ web: { client_id: 'web-id', client_secret: 'web-secret', token_uri: 'https://oauth2.googleapis.com/token' } }));
     await writeFile(tokenFile, JSON.stringify({ refreshToken: 'web-refresh', scope: SCOPE, client: 'web' }));
     const seen: Adopted[] = [];
     const mint: AccessMint = async (c) => {
       seen.push(c);
       return { token: 'access-web', expiresAt: Date.now() + 600_000 };
     };
-    const result = await openTokenStore({ ...env, GSC_OAUTH_WEB_CLIENT_FILE: webClientFile }, { mint }).accessToken();
-    assert.equal(result.ok, true);
-    assert.deepEqual(seen, [{ refreshToken: 'web-refresh', clientId: 'web-id', clientSecret: 'web-secret' }]);
+    for (const webClientFile of [installedFile, webFile]) {
+      const store = openTokenStore({ ...env, GSC_OAUTH_WEB_CLIENT_FILE: webClientFile, GSC_LOGIN_URL: 'https://mini.local/mcp/gsc/login/' }, { mint });
+      const result = await store.accessToken();
+      assert.equal(result.ok, true);
+      assert.equal(store.loginHint(), 'Open https://mini.local/mcp/gsc/login/ in a browser to sign in');
+    }
+    assert.deepEqual(seen, [
+      { refreshToken: 'web-refresh', clientId: 'web-id', clientSecret: 'web-secret' },
+      { refreshToken: 'web-refresh', clientId: 'web-id', clientSecret: 'web-secret' },
+    ]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

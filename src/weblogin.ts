@@ -1,16 +1,30 @@
-import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { OAuth2Client } from 'google-auth-library';
 import { publishToken, readWebClient, scopeGranted, SCOPE, tokenFilePath, type TokenStore } from './token.js';
 
-export type WebExchangeResult = { refreshToken: string; grantedScope: string } | { error: string };
+export type DeviceClient = { clientId: string; clientSecret: string; tokenUri: string };
 
-export type CodeExchange = (code: string, redirectUri: string) => Promise<WebExchangeResult>;
+export type DeviceSession = {
+  deviceCode: string;
+  userCode: string;
+  verificationUrl: string;
+  expiresIn: number;
+  interval: number;
+};
+
+export type DevicePollResult =
+  | { state: 'pending'; slowDown: boolean }
+  | { state: 'granted'; refreshToken: string; grantedScope: string }
+  | { state: 'failed'; error: string };
+
+export type DeviceFlow = {
+  start(client: DeviceClient): Promise<DeviceSession | { error: string }>;
+  poll(client: DeviceClient, deviceCode: string): Promise<DevicePollResult>;
+};
 
 export type WebLoginDeps = {
   env: NodeJS.ProcessEnv;
   store: TokenStore;
-  exchange?: CodeExchange;
+  device?: DeviceFlow;
   now?: () => number;
 };
 
@@ -18,144 +32,193 @@ export type WebLogin = {
   tryHandle(request: IncomingMessage, response: ServerResponse): Promise<boolean>;
 };
 
-const PENDING_TTL_MS = 10 * 60_000;
-const PENDING_CAP = 16;
 const PREFIX = '/mcp/gsc';
+const DEVICE_CODE_URL = 'https://oauth2.googleapis.com/device/code';
+const DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code';
+const POLL_SLACK_MS = 5_000;
+const SLOW_DOWN_MS = 5_000;
+const PAGE_REFRESH_SECONDS = 3;
 
-const DONE_TEXT = 'Login complete. You can close this tab.';
-const FAILED = {
-  mismatch: { status: 400, text: 'Login failed: expired-or-mismatch. Open the sign-in page again and try once more.' },
-  denied: { status: 200, text: 'Login failed: denied. You can close this tab.' },
-  exchange: { status: 200, text: 'Login failed: exchange-failed. Open the sign-in page again and try once more.' },
-  scope: { status: 200, text: 'Login failed: scope-not-granted. Google did not grant the Search Console scope.' },
-} as const;
+type PendingSlot = {
+  deviceCode: string;
+  userCode: string;
+  verificationUrl: string;
+  intervalMs: number;
+  nextPollAt: number;
+  expiresAt: number;
+};
 
-function endText(response: ServerResponse, status: number, text: string): void {
-  response.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
-  response.end(text);
+type FormResult = { ok: true; json: Record<string, unknown> } | { ok: false; error: string };
+
+async function postForm(url: string, form: Record<string, string>): Promise<FormResult> {
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(form).toString(),
+    });
+    const json: unknown = await response.json().catch(() => null);
+    if (typeof json !== 'object' || json === null) return { ok: false, error: 'device flow response malformed' };
+    return { ok: true, json: json as Record<string, unknown> };
+  } catch {
+    return { ok: false, error: 'device flow request failed' };
+  }
 }
 
-function notConfiguredText(redirect: string | undefined): string {
-  const registered = redirect !== undefined && redirect !== '' ? redirect : '<GSC_LOGIN_REDIRECT_URL unset>';
-  return `Web login is not configured. Set GSC_OAUTH_WEB_CLIENT_FILE to the downloaded Web OAuth client JSON, and GSC_LOGIN_REDIRECT_URL to the registered redirect URI, exactly: ${registered}`;
-}
-
-function defaultExchange(client: { clientId: string; clientSecret: string }, redirectUri: string): CodeExchange {
-  return async (code, redirect) => {
-    const oauth = new OAuth2Client({ clientId: client.clientId, clientSecret: client.clientSecret, redirectUri: redirect });
-    try {
-      const exchanged = await oauth.getToken({ code, redirect_uri: redirect });
-      const refreshToken = exchanged.tokens.refresh_token;
-      if (typeof refreshToken !== 'string' || refreshToken === '') return { error: 'missing refresh token' };
-      return { refreshToken, grantedScope: exchanged.tokens.scope ?? '' };
-    } catch {
-      return { error: 'token exchange failed' };
+export const defaultDeviceFlow: DeviceFlow = {
+  async start(client) {
+    const posted = await postForm(DEVICE_CODE_URL, {
+      client_id: client.clientId,
+      client_secret: client.clientSecret,
+      scope: SCOPE,
+    });
+    if (!posted.ok) return { error: posted.error };
+    const deviceCode = posted.json.device_code;
+    const userCode = posted.json.user_code;
+    const verification = posted.json.verification_url ?? posted.json.verification_uri;
+    const expiresIn = Number(posted.json.expires_in);
+    const interval = Number(posted.json.interval);
+    if (
+      typeof deviceCode !== 'string' || deviceCode === '' ||
+      typeof userCode !== 'string' || userCode === '' ||
+      typeof verification !== 'string' || verification === '' ||
+      !Number.isFinite(expiresIn) || !Number.isFinite(interval)
+    ) {
+      return { error: 'device flow response malformed' };
     }
-  };
+    return { deviceCode, userCode, verificationUrl: verification, expiresIn, interval };
+  },
+
+  async poll(client, deviceCode) {
+    const posted = await postForm(client.tokenUri, {
+      grant_type: DEVICE_GRANT,
+      device_code: deviceCode,
+      client_id: client.clientId,
+      client_secret: client.clientSecret,
+    });
+    if (!posted.ok) return { state: 'failed', error: posted.error };
+    const body = posted.json;
+    const error = body.error;
+    if (error === 'authorization_pending') return { state: 'pending', slowDown: false };
+    if (error === 'slow_down') return { state: 'pending', slowDown: true };
+    if (typeof error === 'string') return { state: 'failed', error };
+    const refreshToken = body.refresh_token;
+    const grantedScope = body.scope;
+    return {
+      state: 'granted',
+      refreshToken: typeof refreshToken === 'string' ? refreshToken : '',
+      grantedScope: typeof grantedScope === 'string' ? grantedScope : '',
+    };
+  },
+};
+
+function esc(value: string): string {
+  return value.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
 export function openWebLogin(deps: WebLoginDeps): WebLogin {
   const now = deps.now ?? Date.now;
-  const pending = new Map<string, number>();
+  const flow: DeviceFlow = deps.device ?? defaultDeviceFlow;
+  let slot: PendingSlot | null = null;
 
-  function begin(): string {
-    const cutoff = now();
-    for (const [state, expiresAt] of pending) {
-      if (expiresAt <= cutoff) pending.delete(state);
-    }
-    while (pending.size >= PENDING_CAP) {
-      const oldest = pending.keys().next();
-      if (oldest.done === true) break;
-      pending.delete(oldest.value);
-    }
-    const state = randomBytes(16).toString('hex');
-    pending.set(state, now() + PENDING_TTL_MS);
-    return state;
+  function endText(response: ServerResponse, status: number, text: string): void {
+    response.writeHead(status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    response.end(text);
   }
 
-  // Single-use is structural: Map.delete hands a state out exactly once.
-  function consume(state: string): boolean {
-    const expiresAt = pending.get(state);
-    if (expiresAt === undefined) return false;
-    pending.delete(state);
-    return expiresAt > now();
+  function endHtml(response: ServerResponse, body: string): void {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    response.end(`<!doctype html><meta charset="utf-8"><title>Search Console sign-in</title>${body}`);
   }
 
-  function configuredRedirect(): string | null {
-    const redirect = deps.env.GSC_LOGIN_REDIRECT_URL;
-    return redirect !== undefined && redirect !== '' ? redirect : null;
+  function failedPage(pathname: string, reason: string): string {
+    return `<p>Login failed: ${esc(reason)}.</p><p><a href="${esc(pathname)}">Sign in again</a></p>`;
   }
 
-  async function handleSignIn(response: ServerResponse): Promise<void> {
-    const redirect = configuredRedirect();
-    const client = await readWebClient(deps.env.GSC_OAUTH_WEB_CLIENT_FILE);
-    if (redirect === null || !client.ok) {
-      endText(response, 503, notConfiguredText(deps.env.GSC_LOGIN_REDIRECT_URL));
-      return;
-    }
-    const state = begin();
-    const oauth = new OAuth2Client({ clientId: client.clientId, clientSecret: client.clientSecret, redirectUri: redirect });
-    const authorizeUrl = oauth.generateAuthUrl({
-      access_type: 'offline',
-      prompt: 'consent',
-      scope: [SCOPE],
-      state,
-      redirect_uri: redirect,
-    });
-    response.writeHead(302, {
-      location: authorizeUrl,
-      'content-type': 'text/plain; charset=utf-8',
-      'cache-control': 'no-store',
-    });
-    response.end();
+  function renderPage(response: ServerResponse, pending: PendingSlot): void {
+    const url = esc(pending.verificationUrl);
+    endHtml(
+      response,
+      `<meta http-equiv="refresh" content="${PAGE_REFRESH_SECONDS}">` +
+        `<p>Open <a href="${url}">${url}</a> on any device and enter this code:</p>` +
+        `<p><code style="font-size:2em">${esc(pending.userCode)}</code></p>`,
+    );
   }
 
-  async function handleCallback(url: URL, response: ServerResponse): Promise<void> {
-    const redirect = configuredRedirect();
-    if (redirect === null) {
-      endText(response, 503, notConfiguredText(deps.env.GSC_LOGIN_REDIRECT_URL));
-      return;
-    }
-    const state = url.searchParams.get('state');
-    if (state === null || !consume(state)) {
-      endText(response, FAILED.mismatch.status, FAILED.mismatch.text);
-      return;
-    }
-    if (url.searchParams.get('error') !== null) {
-      endText(response, FAILED.denied.status, FAILED.denied.text);
-      return;
-    }
-    const code = url.searchParams.get('code');
-    if (code === null || code === '') {
-      endText(response, FAILED.mismatch.status, FAILED.mismatch.text);
+  async function handleLogin(pathname: string, response: ServerResponse): Promise<void> {
+    const loginUrl = deps.env.GSC_LOGIN_URL;
+    if (loginUrl === undefined || loginUrl === '') {
+      endText(
+        response,
+        503,
+        "Web login is not configured. Set GSC_OAUTH_WEB_CLIENT_FILE to the downloaded Google OAuth client JSON and GSC_LOGIN_URL to this page's public URL, for example https://mini.local/mcp/gsc/login/",
+      );
       return;
     }
     const client = await readWebClient(deps.env.GSC_OAUTH_WEB_CLIENT_FILE);
     if (!client.ok) {
-      endText(response, 503, notConfiguredText(deps.env.GSC_LOGIN_REDIRECT_URL));
+      endText(
+        response,
+        503,
+        `Web login is not configured. Set GSC_OAUTH_WEB_CLIENT_FILE to the downloaded Google OAuth client JSON and GSC_LOGIN_URL to this page's public URL. ${client.message}`,
+      );
+      return;
+    }
+    const deviceClient: DeviceClient = { clientId: client.clientId, clientSecret: client.clientSecret, tokenUri: client.tokenUri };
+    const nowMs = now();
+    if (slot !== null && slot.expiresAt <= nowMs) slot = null;
+    if (slot === null) {
+      const started = await flow.start(deviceClient);
+      if ('error' in started) {
+        endText(response, 503, `Web login is unavailable: ${started.error}. Open the sign-in page again and try once more.`);
+        return;
+      }
+      slot = {
+        deviceCode: started.deviceCode,
+        userCode: started.userCode,
+        verificationUrl: started.verificationUrl,
+        intervalMs: started.interval * 1000,
+        nextPollAt: nowMs + started.interval * 1000 + POLL_SLACK_MS,
+        expiresAt: nowMs + started.expiresIn * 1000,
+      };
+      renderPage(response, slot);
+      return;
+    }
+    if (nowMs < slot.nextPollAt) {
+      renderPage(response, slot);
+      return;
+    }
+    const result = await flow.poll(deviceClient, slot.deviceCode);
+    if (result.state === 'pending') {
+      slot.nextPollAt = nowMs + slot.intervalMs + POLL_SLACK_MS + (result.slowDown ? SLOW_DOWN_MS : 0);
+      renderPage(response, slot);
+      return;
+    }
+    if (result.state === 'failed') {
+      slot = null;
+      endHtml(response, failedPage(pathname, result.error));
+      return;
+    }
+    if (result.refreshToken === '') {
+      slot = null;
+      endHtml(response, failedPage(pathname, 'Google returned no refresh token'));
+      return;
+    }
+    if (!scopeGranted(result.grantedScope)) {
+      slot = null;
+      endHtml(response, failedPage(pathname, 'Google did not grant the Search Console scope'));
       return;
     }
     try {
-      // The byte-exact configured constant, never a request-derived value.
-      const exchanged = await (deps.exchange ?? defaultExchange(client, redirect))(code, redirect);
-      if ('error' in exchanged) {
-        endText(response, FAILED.exchange.status, FAILED.exchange.text);
-        return;
-      }
-      if (!scopeGranted(exchanged.grantedScope)) {
-        endText(response, FAILED.scope.status, FAILED.scope.text);
-        return;
-      }
-      await publishToken(tokenFilePath(deps.env), exchanged.refreshToken, SCOPE, 'web');
-      deps.store.adopt({
-        refreshToken: exchanged.refreshToken,
-        clientId: client.clientId,
-        clientSecret: client.clientSecret,
-      });
-      endText(response, 200, DONE_TEXT);
+      await publishToken(tokenFilePath(deps.env), result.refreshToken, SCOPE, 'web');
     } catch {
-      endText(response, FAILED.exchange.status, FAILED.exchange.text);
+      slot = null;
+      endHtml(response, failedPage(pathname, 'the token file could not be written'));
+      return;
     }
+    slot = null;
+    deps.store.adopt({ refreshToken: result.refreshToken, clientId: client.clientId, clientSecret: client.clientSecret });
+    endHtml(response, '<p>Login complete. You can close this tab.</p>');
   }
 
   async function tryHandle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
@@ -168,15 +231,9 @@ export function openWebLogin(deps: WebLoginDeps): WebLogin {
     }
     let pathname = url.pathname;
     if (pathname.startsWith(PREFIX)) pathname = pathname.slice(PREFIX.length) || '/';
-    if (pathname === '/login' || pathname === '/login/') {
-      await handleSignIn(response);
-      return true;
-    }
-    if (pathname === '/login/callback') {
-      await handleCallback(url, response);
-      return true;
-    }
-    return false;
+    if (pathname !== '/login' && pathname !== '/login/') return false;
+    await handleLogin(url.pathname, response);
+    return true;
   }
 
   return { tryHandle };

@@ -1,24 +1,73 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { SCOPE, type Adopted, type TokenResult, type TokenStore } from '../dist/token.js';
-import { openWebLogin, type CodeExchange } from '../dist/weblogin.js';
+import {
+  defaultDeviceFlow,
+  openWebLogin,
+  type DeviceClient,
+  type DeviceFlow,
+  type DevicePollResult,
+  type DeviceSession,
+} from '../dist/weblogin.js';
 
-const REDIRECT = 'https://mini.local/mcp/gsc/login/callback';
+const LOGIN_URL = 'https://mini.local/mcp/gsc/login/';
 const READONLY_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
+const DEVICE_CODE_URL = 'https://oauth2.googleapis.com/device/code';
+const GRANT = 'urn:ietf:params:oauth:grant-type:device_code';
+const POLL_DELAY_MS = 5 * 1000 + 5_000;
 
-type Harness = {
-  base: string;
-  dir: string;
-  tokenFile: string;
-  events: string[];
-  adopted: Adopted[];
-  close(): Promise<void>;
-};
+function session(overrides: Partial<DeviceSession> = {}): DeviceSession {
+  return {
+    deviceCode: 'device-1',
+    userCode: 'ABCD-EFGH',
+    verificationUrl: 'https://www.google.com/device',
+    expiresIn: 300,
+    interval: 5,
+    ...overrides,
+  };
+}
+
+function fakeDevice(sessions: DeviceSession[]) {
+  const starts: DeviceClient[] = [];
+  const pollCalls: string[] = [];
+  const results: DevicePollResult[] = [];
+  let index = 0;
+  return {
+    starts,
+    pollCalls,
+    queue(...next: DevicePollResult[]) {
+      results.push(...next);
+    },
+    async start(client: DeviceClient): Promise<DeviceSession | { error: string }> {
+      starts.push(client);
+      const next = sessions[Math.min(index, sessions.length - 1)] ?? session();
+      index += 1;
+      return { ...next };
+    },
+    async poll(_client: DeviceClient, deviceCode: string): Promise<DevicePollResult> {
+      pollCalls.push(deviceCode);
+      const next = results.shift();
+      return next ?? { state: 'pending', slowDown: false };
+    },
+  };
+}
+
+type FakeDevice = ReturnType<typeof fakeDevice>;
+
+function clock(startMs = 1_700_000_000_000) {
+  let ms = startMs;
+  return {
+    now: () => ms,
+    advance: (deltaMs: number) => {
+      ms += deltaMs;
+    },
+  };
+}
 
 function recordingStore(events: string[], adopted: Adopted[], tokenFile: string): TokenStore {
   return {
@@ -29,7 +78,7 @@ function recordingStore(events: string[], adopted: Adopted[], tokenFile: string)
       return { ok: false, message: 'unused' };
     },
     loginHint() {
-      return 'Open the sign-in page in a browser to sign in';
+      return `Open ${LOGIN_URL} in a browser to sign in`;
     },
     adopt(c: Adopted) {
       try {
@@ -43,8 +92,22 @@ function recordingStore(events: string[], adopted: Adopted[], tokenFile: string)
 }
 
 async function harness(
-  opts: { webClientFile?: string | null; redirectUrl?: string | null; exchange?: CodeExchange; now?: () => number } = {},
-): Promise<Harness> {
+  opts: {
+    webClientFile?: string | null;
+    loginUrl?: string | null;
+    device?: FakeDevice;
+    time?: ReturnType<typeof clock>;
+  } = {},
+): Promise<{
+  base: string;
+  dir: string;
+  tokenFile: string;
+  events: string[];
+  adopted: Adopted[];
+  device: FakeDevice;
+  time: ReturnType<typeof clock>;
+  close(): Promise<void>;
+}> {
   const dir = await mkdtemp(join(tmpdir(), 'gsc-weblogin-'));
   const tokenFile = join(dir, 'token.json');
   let webFile = join(dir, 'client-web.json');
@@ -53,23 +116,23 @@ async function harness(
   } else if (typeof opts.webClientFile === 'string') {
     webFile = opts.webClientFile;
   } else {
-    await writeFile(webFile, JSON.stringify({ web: { client_id: 'web-id', client_secret: 'web-secret' } }));
+    await writeFile(
+      webFile,
+      JSON.stringify({ installed: { client_id: 'web-id', client_secret: 'web-secret', token_uri: 'https://oauth2.test/token' } }),
+    );
   }
   const env: NodeJS.ProcessEnv = {
     GSC_TOKEN_FILE: tokenFile,
     GSC_OAUTH_WEB_CLIENT_FILE: webFile,
-    GSC_LOGIN_REDIRECT_URL: REDIRECT,
+    GSC_LOGIN_URL: LOGIN_URL,
   };
   if (opts.webClientFile === null) delete env.GSC_OAUTH_WEB_CLIENT_FILE;
-  if (opts.redirectUrl === null) delete env.GSC_LOGIN_REDIRECT_URL;
+  if (opts.loginUrl === null) delete env.GSC_LOGIN_URL;
   const events: string[] = [];
   const adopted: Adopted[] = [];
-  const webLogin = openWebLogin({
-    env,
-    store: recordingStore(events, adopted, tokenFile),
-    ...(opts.exchange === undefined ? {} : { exchange: opts.exchange }),
-    ...(opts.now === undefined ? {} : { now: opts.now }),
-  });
+  const device = opts.device ?? fakeDevice([session()]);
+  const time = opts.time ?? clock();
+  const webLogin = openWebLogin({ env, store: recordingStore(events, adopted, tokenFile), device, now: time.now });
   const server: Server = createServer((req, res) => {
     void webLogin.tryHandle(req, res).then((handled) => {
       if (!handled) {
@@ -89,6 +152,8 @@ async function harness(
     tokenFile,
     events,
     adopted,
+    device,
+    time,
     async close() {
       server.closeAllConnections();
       const closed = Promise.withResolvers<void>();
@@ -99,228 +164,283 @@ async function harness(
   };
 }
 
-async function beginLogin(base: string, path = '/login/'): Promise<string> {
-  const signin = await fetch(base + path, { redirect: 'manual' });
-  return new URL(signin.headers.get('location') ?? 'https://accounts.google.com/', 'https://accounts.google.com')
-    .searchParams.get('state') ?? '';
-}
-
-test('GET /login/ and /mcp/gsc/login/ redirect to Google with the configured redirect_uri', async () => {
-  const h = await harness();
-  try {
-    for (const path of ['/login/', '/mcp/gsc/login/', '/login']) {
-      const response = await fetch(h.base + path, { redirect: 'manual' });
-      assert.equal(response.status, 302);
-      const location = response.headers.get('location') ?? '';
-      assert.match(location, /^https:\/\/accounts\.google\.com\//);
-      assert.match(location, /client_id=web-id/);
-      assert.match(location, /state=[0-9a-f]{32}/);
-      assert.match(location, /prompt=consent/);
-      assert.match(location, /access_type=offline/);
-      assert.match(location, /scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fwebmasters/);
-      assert.match(location, /redirect_uri=https%3A%2F%2Fmini\.local%2Fmcp%2Fgsc%2Flogin%2Fcallback/);
-      assert.equal(response.headers.get('cache-control'), 'no-store');
-    }
-  } finally {
-    await h.close();
-  }
-});
-
-test('non-GET requests and non-login paths are not handled', async () => {
-  const h = await harness();
-  try {
-    const post = await fetch(h.base + '/login/', { method: 'POST' });
-    assert.equal(post.status, 404);
-    assert.equal(await post.text(), 'mcp-stub');
-    const initialize = await fetch(h.base + '/initialize');
-    assert.equal(initialize.status, 404);
-    assert.equal(await initialize.text(), 'mcp-stub');
-    const postCallback = await fetch(h.base + '/mcp/gsc/login/callback?code=code-1&state=st', { method: 'POST' });
-    assert.equal(postCallback.status, 404);
-    assert.equal(await postCallback.text(), 'mcp-stub');
-  } finally {
-    await h.close();
-  }
-});
-
-test('the callback exchanges the code with the configured redirect, publishes the file, then adopts', async () => {
-  for (const callbackPath of ['/login/callback', '/mcp/gsc/login/callback']) {
-    const seen: [string, string][] = [];
-    const exchange: CodeExchange = async (code, redirectUri) => {
-      seen.push([code, redirectUri]);
-      return { refreshToken: 'rt-web', grantedScope: SCOPE };
-    };
-    const h = await harness({ exchange });
+test('GET /login/ begins the device flow and renders the user code behind no-store', async () => {
+  for (const path of ['/login/', '/mcp/gsc/login/', '/login']) {
+    const h = await harness();
     try {
-      const state = await beginLogin(h.base);
-      const done = await fetch(`${h.base}${callbackPath}?code=code-1&state=${state}`);
-      assert.equal(done.status, 200);
-      assert.equal(await done.text(), 'Login complete. You can close this tab.');
-      assert.equal(done.headers.get('cache-control'), 'no-store');
-      assert.deepEqual(seen, [['code-1', REDIRECT]]);
-      const stored = JSON.parse(await readFile(h.tokenFile, 'utf8'));
-      assert.deepEqual(stored, { refreshToken: 'rt-web', scope: SCOPE, client: 'web' });
-      assert.equal((await stat(h.tokenFile)).mode & 0o777, 0o600);
-      assert.deepEqual(h.adopted, [{ refreshToken: 'rt-web', clientId: 'web-id', clientSecret: 'web-secret' }]);
-      assert.equal(h.events[0], `adopt:${JSON.stringify(stored)}`);
+      const response = await fetch(h.base + path);
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8');
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+      const page = await response.text();
+      assert.match(page, /<meta http-equiv="refresh" content="3">/);
+      assert.match(page, /ABCD-EFGH/);
+      assert.match(page, /https:\/\/www\.google\.com\/device/);
+      assert.deepEqual(h.device.starts, [{ clientId: 'web-id', clientSecret: 'web-secret', tokenUri: 'https://oauth2.test/token' }]);
+      assert.deepEqual(h.device.pollCalls, []);
     } finally {
       await h.close();
     }
   }
 });
 
-test('replaying the same state fails and the exchange runs once', async () => {
-  let count = 0;
-  const exchange: CodeExchange = async () => {
-    count += 1;
-    return { refreshToken: 'rt-web', grantedScope: SCOPE };
-  };
-  const h = await harness({ exchange });
+test('polling waits for nextPollAt and pending keeps the page', async () => {
+  const h = await harness();
   try {
-    const state = await beginLogin(h.base, '/mcp/gsc/login/');
-    const first = await fetch(`${h.base}/mcp/gsc/login/callback?code=code-1&state=${state}`);
-    assert.equal(first.status, 200);
-    const replay = await fetch(`${h.base}/mcp/gsc/login/callback?code=code-1&state=${state}`);
-    assert.equal(replay.status, 400);
-    assert.match(await replay.text(), /expired-or-mismatch/);
-    assert.equal(count, 1);
-    assert.deepEqual(JSON.parse(await readFile(h.tokenFile, 'utf8')), {
-      refreshToken: 'rt-web',
-      scope: SCOPE,
-      client: 'web',
-    });
+    const first = await (await fetch(h.base + '/login/')).text();
+    assert.match(first, /ABCD-EFGH/);
+    await fetch(h.base + '/login/');
+    assert.equal(h.device.pollCalls.length, 0);
+    assert.equal(h.device.starts.length, 1);
+    h.time.advance(POLL_DELAY_MS - 1);
+    await fetch(h.base + '/login/');
+    assert.equal(h.device.pollCalls.length, 0);
+    h.time.advance(1);
+    await fetch(h.base + '/login/');
+    assert.deepEqual(h.device.pollCalls, ['device-1']);
+    const page = await (await fetch(h.base + '/login/')).text();
+    assert.match(page, /ABCD-EFGH/);
+    assert.equal(h.device.pollCalls.length, 1);
+    h.time.advance(POLL_DELAY_MS - 1);
+    await fetch(h.base + '/login/');
+    assert.equal(h.device.pollCalls.length, 1);
+    h.time.advance(1);
+    await fetch(h.base + '/login/');
+    assert.equal(h.device.pollCalls.length, 2);
   } finally {
     await h.close();
   }
 });
 
-test('an unknown state fails without exchanging and writes no token file', async () => {
-  let count = 0;
-  const exchange: CodeExchange = async () => {
-    count += 1;
-    return { refreshToken: 'rt-x', grantedScope: SCOPE };
-  };
-  const h = await harness({ exchange });
+test('a granted poll publishes the token file, then adopts', async () => {
+  const device = fakeDevice([session()]);
+  device.queue({ state: 'granted', refreshToken: 'refresh-web', grantedScope: SCOPE });
+  const h = await harness({ device });
   try {
-    const response = await fetch(`${h.base}/login/callback?code=code-1&state=${'0'.repeat(32)}`);
-    assert.equal(response.status, 400);
-    assert.match(await response.text(), /expired-or-mismatch/);
-    assert.equal(count, 0);
-    await assert.rejects(() => stat(h.tokenFile), { code: 'ENOENT' });
-  } finally {
-    await h.close();
-  }
-});
-
-test('a pending session past the TTL fails without exchanging', async () => {
-  let clock = 1_700_000_000_000;
-  let count = 0;
-  const exchange: CodeExchange = async () => {
-    count += 1;
-    return { refreshToken: 'rt-x', grantedScope: SCOPE };
-  };
-  const h = await harness({ exchange, now: () => clock });
-  try {
-    const state = await beginLogin(h.base);
-    clock += 10 * 60_000 + 1;
-    const response = await fetch(`${h.base}/mcp/gsc/login/callback?code=code-1&state=${state}`);
-    assert.equal(response.status, 400);
-    assert.match(await response.text(), /expired-or-mismatch/);
-    assert.equal(count, 0);
-  } finally {
-    await h.close();
-  }
-});
-
-test("Google's error parameter answers the denied page without an exchange", async () => {
-  let count = 0;
-  const exchange: CodeExchange = async () => {
-    count += 1;
-    return { refreshToken: 'rt-x', grantedScope: SCOPE };
-  };
-  const h = await harness({ exchange });
-  try {
-    const state = await beginLogin(h.base);
-    const response = await fetch(`${h.base}/mcp/gsc/login/callback?error=access_denied&state=${state}`);
+    await fetch(h.base + '/mcp/gsc/login/');
+    h.time.advance(POLL_DELAY_MS);
+    const response = await fetch(h.base + '/mcp/gsc/login/');
     assert.equal(response.status, 200);
-    assert.match(await response.text(), /denied/);
-    assert.equal(count, 0);
-    await assert.rejects(() => stat(h.tokenFile), { code: 'ENOENT' });
+    const page = await response.text();
+    assert.match(page, /Login complete/);
+    assert.doesNotMatch(page, /meta http-equiv="refresh"/);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(h.events, [`adopt:{"refreshToken":"refresh-web","scope":"${SCOPE}","client":"web"}`]);
+    assert.deepEqual(h.adopted, [{ refreshToken: 'refresh-web', clientId: 'web-id', clientSecret: 'web-secret' }]);
+    assert.equal(await readFile(h.tokenFile, 'utf8'), JSON.stringify({ refreshToken: 'refresh-web', scope: SCOPE, client: 'web' }));
   } finally {
     await h.close();
   }
 });
 
-test('a read-only grant answers scope-not-granted and leaves the file unchanged', async () => {
-  const exchange: CodeExchange = async () => ({ refreshToken: 'rt-bad', grantedScope: READONLY_SCOPE });
-  const h = await harness({ exchange });
+test('slow_down backs the next poll off by five more seconds', async () => {
+  const device = fakeDevice([session()]);
+  device.queue({ state: 'pending', slowDown: true }, { state: 'granted', refreshToken: 'refresh-web', grantedScope: SCOPE });
+  const h = await harness({ device });
   try {
-    const before = { refreshToken: 'first-refresh', scope: SCOPE, client: 'web' };
-    await writeFile(h.tokenFile, JSON.stringify(before));
-    const state = await beginLogin(h.base);
-    const response = await fetch(`${h.base}/mcp/gsc/login/callback?code=code-1&state=${state}`);
-    assert.equal(response.status, 200);
-    assert.match(await response.text(), /scope-not-granted/);
-    assert.deepEqual(JSON.parse(await readFile(h.tokenFile, 'utf8')), before);
+    await fetch(h.base + '/login/');
+    h.time.advance(POLL_DELAY_MS);
+    await fetch(h.base + '/login/');
+    assert.equal(h.device.pollCalls.length, 1);
+    h.time.advance(POLL_DELAY_MS + 5_000 - 1);
+    await fetch(h.base + '/login/');
+    assert.equal(h.device.pollCalls.length, 1);
+    h.time.advance(1);
+    const page = await (await fetch(h.base + '/login/')).text();
+    assert.equal(h.device.pollCalls.length, 2);
+    assert.match(page, /Login complete/);
+  } finally {
+    await h.close();
+  }
+});
+
+test('access_denied answers the failed page with a restart link and re-begins', async () => {
+  const device = fakeDevice([session(), session({ deviceCode: 'device-2', userCode: 'WWXX-YYZZ' })]);
+  device.queue({ state: 'failed', error: 'access_denied' });
+  const h = await harness({ device });
+  try {
+    await fetch(h.base + '/mcp/gsc/login/');
+    h.time.advance(POLL_DELAY_MS);
+    const failed = await (await fetch(h.base + '/mcp/gsc/login/')).text();
+    assert.match(failed, /access_denied/);
+    assert.match(failed, /<a href="\/mcp\/gsc\/login\/">Sign in again<\/a>/);
+    await fetch(h.base + '/mcp/gsc/login/');
+    assert.equal(h.device.starts.length, 2);
+    assert.equal(h.device.pollCalls.length, 1);
+    const restarted = await (await fetch(h.base + '/mcp/gsc/login/')).text();
+    assert.match(restarted, /WWXX-YYZZ/);
+  } finally {
+    await h.close();
+  }
+});
+
+test('an expired slot re-begins with a fresh device code', async () => {
+  const device = fakeDevice([session(), session({ deviceCode: 'device-2', userCode: 'WWXX-YYZZ' })]);
+  const h = await harness({ device });
+  try {
+    await fetch(h.base + '/login/');
+    h.time.advance(300 * 1000);
+    const page = await (await fetch(h.base + '/login/')).text();
+    assert.equal(h.device.starts.length, 2);
+    assert.equal(h.device.pollCalls.length, 0);
+    assert.match(page, /WWXX-YYZZ/);
+    assert.doesNotMatch(page, /ABCD-EFGH/);
+  } finally {
+    await h.close();
+  }
+});
+
+test('a read-only grant answers the scope failure and writes no token file', async () => {
+  const device = fakeDevice([session()]);
+  device.queue({ state: 'granted', refreshToken: 'refresh-web', grantedScope: READONLY_SCOPE });
+  const h = await harness({ device });
+  try {
+    await fetch(h.base + '/login/');
+    h.time.advance(POLL_DELAY_MS);
+    const page = await (await fetch(h.base + '/login/')).text();
+    assert.match(page, /Login failed/);
+    assert.match(page, /scope/);
+    assert.deepEqual(h.events, []);
     assert.deepEqual(h.adopted, []);
+    assert.equal(await readFile(h.tokenFile, 'utf8').catch(() => null), null);
   } finally {
     await h.close();
   }
 });
 
-test('a failing exchange answers the exchange-failed page and leaves the file unchanged', async () => {
-  const exchange: CodeExchange = async () => ({ error: 'redirect_uri_mismatch' });
-  const h = await harness({ exchange });
+test('a granted poll without a refresh token answers the failed page', async () => {
+  const device = fakeDevice([session()]);
+  device.queue({ state: 'granted', refreshToken: '', grantedScope: SCOPE });
+  const h = await harness({ device });
   try {
-    const before = { refreshToken: 'first-refresh', scope: SCOPE, client: 'web' };
-    await writeFile(h.tokenFile, JSON.stringify(before));
-    const state = await beginLogin(h.base);
-    const response = await fetch(`${h.base}/login/callback?code=code-1&state=${state}`);
-    assert.equal(response.status, 200);
-    assert.match(await response.text(), /exchange-failed/);
-    assert.deepEqual(JSON.parse(await readFile(h.tokenFile, 'utf8')), before);
-    assert.deepEqual(h.adopted, []);
+    await fetch(h.base + '/login/');
+    h.time.advance(POLL_DELAY_MS);
+    const page = await (await fetch(h.base + '/login/')).text();
+    assert.match(page, /no refresh token/);
+    assert.deepEqual(h.events, []);
   } finally {
     await h.close();
   }
 });
 
-test('missing web configuration answers 503 naming the env vars and the exact redirect', async () => {
+test('non-GET requests, removed callback, and non-login paths are not handled', async () => {
+  const h = await harness();
+  try {
+    const post = await fetch(h.base + '/login/', { method: 'POST' });
+    assert.equal(post.status, 404);
+    assert.equal(await post.text(), 'mcp-stub');
+    const callback = await fetch(h.base + '/mcp/gsc/login/callback?code=code-1&state=st');
+    assert.equal(callback.status, 404);
+    assert.equal(await callback.text(), 'mcp-stub');
+    const other = await fetch(h.base + '/login/extra');
+    assert.equal(other.status, 404);
+    assert.equal(h.device.starts.length, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test('missing web configuration answers 503 naming both env vars', async () => {
+  const noLoginUrl = await harness({ loginUrl: null });
+  try {
+    const response = await fetch(noLoginUrl.base + '/mcp/gsc/login/');
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const text = await response.text();
+    assert.match(text, /GSC_OAUTH_WEB_CLIENT_FILE/);
+    assert.match(text, /GSC_LOGIN_URL/);
+    assert.equal(noLoginUrl.device.starts.length, 0);
+  } finally {
+    await noLoginUrl.close();
+  }
   const noClient = await harness({ webClientFile: null });
   try {
     const response = await fetch(noClient.base + '/login/');
     assert.equal(response.status, 503);
-    const text = await response.text();
-    assert.match(text, /GSC_OAUTH_WEB_CLIENT_FILE/);
-    assert.match(text, /GSC_LOGIN_REDIRECT_URL/);
-    assert.ok(text.includes(REDIRECT));
-    assert.equal(response.headers.get('cache-control'), 'no-store');
-    const callback = await fetch(`${noClient.base}/mcp/gsc/login/callback?code=c&state=s`);
-    assert.equal(callback.status, 400);
+    assert.match(await response.text(), /GSC_OAUTH_WEB_CLIENT_FILE/);
   } finally {
     await noClient.close();
   }
-  const noRedirect = await harness({ redirectUrl: null });
-  try {
-    const response = await fetch(noRedirect.base + '/mcp/gsc/login/');
-    assert.equal(response.status, 503);
-    assert.match(await response.text(), /GSC_LOGIN_REDIRECT_URL/);
-  } finally {
-    await noRedirect.close();
-  }
   const dir = await mkdtemp(join(tmpdir(), 'gsc-weblogin-'));
   try {
-    const desktopFile = join(dir, 'client.json');
-    await writeFile(desktopFile, JSON.stringify({ installed: { client_id: 'i', client_secret: 's' } }));
-    const wrongType = await harness({ webClientFile: desktopFile });
+    const junkFile = join(dir, 'junk.json');
+    await writeFile(junkFile, '{"note":"no client here"}');
+    const junk = await harness({ webClientFile: junkFile });
     try {
-      const response = await fetch(wrongType.base + '/login/');
+      const response = await fetch(junk.base + '/login/');
       assert.equal(response.status, 503);
       assert.match(await response.text(), /GSC_OAUTH_WEB_CLIENT_FILE/);
     } finally {
-      await wrongType.close();
+      await junk.close();
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('defaultDeviceFlow posts form-encoded requests to the device and token endpoints', async () => {
+  const client: DeviceClient = { clientId: 'cid', clientSecret: 'sec', tokenUri: 'https://oauth2.test/token' };
+  const calls: { url: string; contentType: string; body: URLSearchParams }[] = [];
+  const replies: unknown[] = [
+    { device_code: 'dc-1', user_code: 'ABCD-EFGH', verification_url: 'https://www.google.com/device', expires_in: '300', interval: '5' },
+    { error: 'authorization_pending' },
+    { error: 'slow_down' },
+    { refresh_token: 'rt-1', scope: SCOPE },
+    { device_code: 'dc-2', user_code: 'WXYZ-1234', verification_uri: 'https://oauth2.googleapis.com/activate', expires_in: 600, interval: 10 },
+    'not json',
+    { error: 'expired_token' },
+  ];
+  let rejectNext = false;
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown, init?: { headers?: Record<string, string>; body?: string }) => {
+    if (rejectNext) {
+      rejectNext = false;
+      throw new TypeError('network down');
+    }
+    calls.push({
+      url: String(input),
+      contentType: init?.headers?.['content-type'] ?? '',
+      body: new URLSearchParams(init?.body ?? ''),
+    });
+    const payload = replies.shift();
+    return new Response(payload === undefined ? '{}' : JSON.stringify(payload), { status: 200 });
+  }) as typeof globalThis.fetch;
+  try {
+    assert.deepEqual(await defaultDeviceFlow.start(client), {
+      deviceCode: 'dc-1',
+      userCode: 'ABCD-EFGH',
+      verificationUrl: 'https://www.google.com/device',
+      expiresIn: 300,
+      interval: 5,
+    });
+    assert.equal(calls[0]?.url, DEVICE_CODE_URL);
+    assert.equal(calls[0]?.contentType, 'application/x-www-form-urlencoded');
+    assert.equal(calls[0]?.body.get('client_id'), 'cid');
+    assert.equal(calls[0]?.body.get('client_secret'), 'sec');
+    assert.equal(calls[0]?.body.get('scope'), SCOPE);
+
+    assert.deepEqual(await defaultDeviceFlow.poll(client, 'dc-1'), { state: 'pending', slowDown: false });
+    assert.equal(calls[1]?.url, 'https://oauth2.test/token');
+    assert.equal(calls[1]?.contentType, 'application/x-www-form-urlencoded');
+    assert.equal(calls[1]?.body.get('grant_type'), GRANT);
+    assert.equal(calls[1]?.body.get('device_code'), 'dc-1');
+    assert.equal(calls[1]?.body.get('client_id'), 'cid');
+    assert.equal(calls[1]?.body.get('client_secret'), 'sec');
+    assert.deepEqual(await defaultDeviceFlow.poll(client, 'dc-1'), { state: 'pending', slowDown: true });
+    assert.deepEqual(await defaultDeviceFlow.poll(client, 'dc-1'), { state: 'granted', refreshToken: 'rt-1', grantedScope: SCOPE });
+
+    assert.deepEqual(await defaultDeviceFlow.start(client), {
+      deviceCode: 'dc-2',
+      userCode: 'WXYZ-1234',
+      verificationUrl: 'https://oauth2.googleapis.com/activate',
+      expiresIn: 600,
+      interval: 10,
+    });
+    assert.deepEqual(await defaultDeviceFlow.poll(client, 'dc-2'), { state: 'failed', error: 'device flow response malformed' });
+    assert.deepEqual(await defaultDeviceFlow.poll(client, 'dc-2'), { state: 'failed', error: 'expired_token' });
+    rejectNext = true;
+    assert.deepEqual(await defaultDeviceFlow.poll(client, 'dc-2'), { state: 'failed', error: 'device flow request failed' });
+  } finally {
+    globalThis.fetch = original;
   }
 });
