@@ -14,9 +14,6 @@ const CLIENT_FILE_MESSAGE = 'Set GSC_OAUTH_CLIENT_FILE to a Desktop OAuth client
 const WEB_CLIENT_MESSAGE = 'GSC_OAUTH_CLIENT_FILE is a Web client. Create a Desktop client.';
 const INSTALLED_FIELDS_MESSAGE =
   'GSC_OAUTH_CLIENT_FILE must include installed.client_id and installed.client_secret.';
-const WEB_CLIENT_FILE_MESSAGE = 'Set GSC_OAUTH_WEB_CLIENT_FILE to the downloaded Google OAuth client JSON file.';
-const WEB_FIELDS_MESSAGE = 'GSC_OAUTH_WEB_CLIENT_FILE must include client_id and client_secret.';
-const DEFAULT_TOKEN_URI = 'https://oauth2.googleapis.com/token';
 
 declare const accessTokenBrand: unique symbol;
 export type AccessToken = string & { readonly [accessTokenBrand]: 'AccessToken' };
@@ -47,12 +44,8 @@ export type OAuthExchange = {
   start(redirectUri: string): Promise<{ refreshToken: string; grantedScope: string } | { error: string }>;
 };
 
-type ClientCredentials =
+export type ClientCredentials =
   | { ok: true; clientId: string; clientSecret: string }
-  | { ok: false; message: string };
-
-export type WebClientCredentials =
-  | { ok: true; clientId: string; clientSecret: string; tokenUri: string }
   | { ok: false; message: string };
 
 type StoredRead = { ok: true; token: StoredToken } | { ok: false; message: string };
@@ -120,7 +113,7 @@ async function readStoredToken(file: string, hint: string): Promise<StoredRead> 
   return { ok: false, message: hint };
 }
 
-async function readDesktopClient(file: string | undefined): Promise<ClientCredentials> {
+export async function readDesktopClient(file: string | undefined): Promise<ClientCredentials> {
   if (file === undefined || file === '') return { ok: false, message: CLIENT_FILE_MESSAGE };
   let text: string;
   try {
@@ -148,44 +141,15 @@ async function readDesktopClient(file: string | undefined): Promise<ClientCreden
   return { ok: true, clientId, clientSecret };
 }
 
-export async function readWebClient(file: string | undefined): Promise<WebClientCredentials> {
-  if (file === undefined || file === '') return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
-  let text: string;
-  try {
-    text = await readFile(file, 'utf8');
-  } catch {
-    return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
-  }
-  let json: unknown;
-  try {
-    const parsed: unknown = JSON.parse(text);
-    json = parsed;
-  } catch {
-    return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
-  }
-  if (!isRecord(json)) return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
-  const wrapper = isRecord(json.installed) ? json.installed : isRecord(json.web) ? json.web : null;
-  if (wrapper === null) return { ok: false, message: WEB_CLIENT_FILE_MESSAGE };
-  const clientId = wrapper.client_id;
-  const clientSecret = wrapper.client_secret;
-  if (typeof clientId !== 'string' || clientId === '' || typeof clientSecret !== 'string' || clientSecret === '') {
-    return { ok: false, message: WEB_FIELDS_MESSAGE };
-  }
-  const tokenUri = typeof wrapper.token_uri === 'string' && wrapper.token_uri !== '' ? wrapper.token_uri : DEFAULT_TOKEN_URI;
-  return { ok: true, clientId, clientSecret, tokenUri };
-}
 
 async function loadCredentials(
   tokenFile: string,
   clientFile: string | undefined,
-  webClientFile: string | undefined,
-  wantClient: ClientKind | undefined,
   hint: string,
 ): Promise<Loaded> {
   const stored = await readStoredToken(tokenFile, hint);
   if (!stored.ok) return stored;
-  const kind = wantClient ?? stored.token.client ?? 'desktop';
-  const client = kind === 'web' ? await readWebClient(webClientFile) : await readDesktopClient(clientFile);
+  const client = await readDesktopClient(clientFile);
   if (!client.ok) return client;
   return {
     ok: true,
@@ -369,13 +333,7 @@ const defaultAccessMint: AccessMint = async (c) => {
 
 export function openTokenStore(env: NodeJS.ProcessEnv, opts?: { mint?: AccessMint }): TokenStore {
   const hint = loginMessage(env);
-  let credentials: Promise<Loaded> = loadCredentials(
-    tokenFilePath(env),
-    env.GSC_OAUTH_CLIENT_FILE,
-    env.GSC_OAUTH_WEB_CLIENT_FILE,
-    undefined,
-    hint,
-  );
+  let credentials: Promise<Loaded> = loadCredentials(tokenFilePath(env), env.GSC_OAUTH_CLIENT_FILE, hint);
   const mintAccess = opts?.mint ?? defaultAccessMint;
   let cached: CachedAccess | null = null;
   let inflight: Promise<TokenResult> | null = null;

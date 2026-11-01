@@ -154,7 +154,7 @@ test('a legacy token file without client mints through the desktop client file',
   }
 });
 
-test('a web client token file without a web client file names the web env var and calls no HTTP', async () => {
+test('a web client token file without a client file names the OAuth client env var and calls no HTTP', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'gsc-token-'));
   const tokenFile = join(dir, 'token.json');
   const calls: string[] = [];
@@ -172,36 +172,27 @@ test('a web client token file without a web client file names the web env var an
     assert.equal(result.ok, false);
     if (!result.ok) {
       assert.equal(result.code, 'not_logged_in');
-      assert.match(result.message, /GSC_OAUTH_WEB_CLIENT_FILE/);
+      assert.match(result.message, /GSC_OAUTH_CLIENT_FILE/);
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test('a web client token file mints with the web client credentials from either client shape', async () => {
+test('a web client token file mints with the desktop client credentials', async () => {
   const { dir, env, tokenFile } = await tempEnv();
   try {
-    const installedFile = join(dir, 'client-web-installed.json');
-    const webFile = join(dir, 'client-web.json');
-    await writeFile(installedFile, JSON.stringify({ installed: { client_id: 'web-id', client_secret: 'web-secret' } }));
-    await writeFile(webFile, JSON.stringify({ web: { client_id: 'web-id', client_secret: 'web-secret', token_uri: 'https://oauth2.googleapis.com/token' } }));
     await writeFile(tokenFile, JSON.stringify({ refreshToken: 'web-refresh', scope: SCOPE, client: 'web' }));
     const seen: Adopted[] = [];
     const mint: AccessMint = async (c) => {
       seen.push(c);
       return { token: 'access-web', expiresAt: Date.now() + 600_000 };
     };
-    for (const webClientFile of [installedFile, webFile]) {
-      const store = openTokenStore({ ...env, GSC_OAUTH_WEB_CLIENT_FILE: webClientFile, GSC_LOGIN_URL: 'https://mini.local/mcp/gsc/login/' }, { mint });
-      const result = await store.accessToken();
-      assert.equal(result.ok, true);
-      assert.equal(store.loginHint(), 'Open https://mini.local/mcp/gsc/login/ in a browser to sign in');
-    }
-    assert.deepEqual(seen, [
-      { refreshToken: 'web-refresh', clientId: 'web-id', clientSecret: 'web-secret' },
-      { refreshToken: 'web-refresh', clientId: 'web-id', clientSecret: 'web-secret' },
-    ]);
+    const store = openTokenStore({ ...env, GSC_LOGIN_URL: 'https://mini.local/mcp/gsc/login/' }, { mint });
+    const result = await store.accessToken();
+    assert.equal(result.ok, true);
+    assert.equal(store.loginHint(), 'Open https://mini.local/mcp/gsc/login/ in a browser to sign in');
+    assert.deepEqual(seen, [{ refreshToken: 'web-refresh', clientId: 'test-client', clientSecret: 'test-secret' }]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

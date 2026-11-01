@@ -61,6 +61,26 @@ function postWithHost(hostHeader: string): Promise<number> {
   return promise;
 }
 
+function postLoginWithHost(hostHeader: string, targetPort: number): Promise<number> {
+  const { promise, resolve, reject } = Promise.withResolvers<number>();
+  const req = request(
+    {
+      host: '127.0.0.1',
+      port: targetPort,
+      path: '/mcp/gsc/login/',
+      method: 'POST',
+      headers: { host: hostHeader, 'content-type': 'application/x-www-form-urlencoded' },
+    },
+    (res) => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode ?? 0));
+    },
+  );
+  req.on('error', reject);
+  req.end('url=http%3A%2F%2F127.0.0.1%3A9%2F%3Fcode%3Dx%26state%3Dy');
+  return promise;
+}
+
 async function jsonBody(response: Response): Promise<unknown> {
   const text = await response.text();
   const frame = text.split('\n').find((line) => line.startsWith('data: '));
@@ -121,8 +141,17 @@ test('serve-http answers the unconfigured login page with 503 while MCP routes s
     assert.equal(signin.status, 503);
     assert.equal(signin.headers.get('cache-control'), 'no-store');
     const text = await signin.text();
-    assert.match(text, /GSC_OAUTH_WEB_CLIENT_FILE/);
+    assert.match(text, /GSC_OAUTH_CLIENT_FILE/);
     assert.match(text, /GSC_LOGIN_URL/);
+
+    const signinPost = await fetch(`http://127.0.0.1:${loginPort}/mcp/gsc/login/`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'url=http%3A%2F%2F127.0.0.1%3A9%2F%3Fcode%3Dx%26state%3Dy',
+    });
+    assert.equal(signinPost.status, 503);
+    assert.equal(signinPost.headers.get('cache-control'), 'no-store');
+    assert.match(await signinPost.text(), /GSC_OAUTH_CLIENT_FILE/);
 
     const init = await rpc(
       {
@@ -136,6 +165,7 @@ test('serve-http answers the unconfigured login page with 503 while MCP routes s
     assert.equal(init.status, 200);
 
     assert.equal(await getWithHost('/login/', 'evil.example', loginPort), 403);
+    assert.equal(await postLoginWithHost('evil.example', loginPort), 403);
   } finally {
     child.kill();
   }
