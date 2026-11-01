@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { toolCatalog, type Http, type WireRequest, type WireResponse } from '../dist/console.js';
 import {
   openTokenStore,
-  READONLY_SCOPE,
+  SCOPE,
   TOKEN_PARTIAL_SUFFIX,
   type AccessToken,
   type TokenSource,
@@ -548,7 +548,7 @@ test('a partial sibling is never read into a tool error', async () => {
   try {
     await writeFile(
       `${tokenFile}${TOKEN_PARTIAL_SUFFIX}`,
-      JSON.stringify({ refreshToken: canary, scope: READONLY_SCOPE, leak: canary }),
+      JSON.stringify({ refreshToken: canary, scope: SCOPE, leak: canary }),
     );
     await writeFile(join(dir, 'client.json'), JSON.stringify({ installed: { client_id: 'id', client_secret: 'secret' } }));
     const http: Http = async () => {
@@ -573,4 +573,114 @@ test('a partial sibling is never read into a tool error', async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+const DOMAIN = 'sc-domain:example.com';
+const SITEMAP_PORT = 'https://www.example.com:8443/sitemap.xml';
+
+function resourceUrl(site: string): string {
+  return `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site)}`;
+}
+
+function sitemapWireUrl(site: string, path: string): string {
+  return `${resourceUrl(site)}/sitemaps/${encodeURIComponent(path)}`;
+}
+
+function assertWrite(request: WireRequest | undefined, method: 'PUT' | 'DELETE', url: string): void {
+  assert.ok(request);
+  assert.equal(request.method, method);
+  assert.equal(request.url, url);
+  assert.equal(Object.hasOwn(request, 'body'), false);
+}
+
+test('add_site and remove_site send the encoded property and no body', async () => {
+  const { calls, catalog } = harness(() => ({ status: 200, text: '' }));
+  const extra = await catalog.add_site.run({ siteUrl: DOMAIN, confirm: true });
+  assert.equal(extra.ok, false);
+  if (!extra.ok) assert.equal(extra.code, 'invalid_args');
+  assert.equal(calls.length, 0);
+  const added = await catalog.add_site.run({ siteUrl: DOMAIN });
+  assert.equal(added.ok, true, JSON.stringify(added));
+  if (added.ok) assert.deepEqual(added.value, { siteUrl: DOMAIN });
+  assertWrite(calls[0], 'PUT', resourceUrl(DOMAIN));
+  const removed = await catalog.remove_site.run({ siteUrl: DOMAIN });
+  assert.equal(removed.ok, true, JSON.stringify(removed));
+  if (removed.ok) assert.deepEqual(removed.value, { siteUrl: DOMAIN, outcome: 'removed' });
+  assertWrite(calls[1], 'DELETE', resourceUrl(DOMAIN));
+  assert.equal(calls.length, 2);
+});
+
+test('submit_sitemap and remove_sitemap accept a port and send no body', async () => {
+  const { calls, catalog } = harness(() => ({ status: 200, text: '' }));
+  const submitted = await catalog.submit_sitemap.run({ siteUrl: DOMAIN, path: SITEMAP_PORT });
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  if (submitted.ok) assert.deepEqual(submitted.value, { siteUrl: DOMAIN, path: SITEMAP_PORT });
+  assertWrite(calls[0], 'PUT', sitemapWireUrl(DOMAIN, SITEMAP_PORT));
+  const removed = await catalog.remove_sitemap.run({ siteUrl: DOMAIN, path: SITEMAP_PORT });
+  assert.equal(removed.ok, true, JSON.stringify(removed));
+  if (removed.ok) {
+    assert.deepEqual(removed.value, { siteUrl: DOMAIN, path: SITEMAP_PORT, outcome: 'removed' });
+  }
+  assertWrite(calls[1], 'DELETE', sitemapWireUrl(DOMAIN, SITEMAP_PORT));
+  assert.equal(calls.length, 2);
+  const user = await catalog.submit_sitemap.run({
+    siteUrl: DOMAIN,
+    path: 'https://user:secret@www.example.com/sitemap.xml',
+  });
+  assert.equal(user.ok, false);
+  if (!user.ok) {
+    assert.equal(user.code, 'invalid_args');
+    assert.equal(user.message, 'Pass an absolute http or https URL with no username or password.');
+  }
+  assert.equal(calls.length, 2);
+  assert.equal(JSON.stringify(user).includes('secret'), false);
+});
+
+test('a non-empty 2xx write is bad_response', async () => {
+  const { calls, catalog } = harness(() => ({ status: 200, text: '{}' }));
+  const added = await catalog.add_site.run({ siteUrl: DOMAIN });
+  const removed = await catalog.remove_site.run({ siteUrl: DOMAIN });
+  const submitted = await catalog.submit_sitemap.run({ siteUrl: DOMAIN, path: SITEMAP_PORT });
+  const sitemap = await catalog.remove_sitemap.run({ siteUrl: DOMAIN, path: SITEMAP_PORT });
+  for (const result of [added, removed, submitted, sitemap]) {
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.code, 'bad_response');
+      assert.equal(result.message.includes('{}'), false);
+    }
+  }
+  assert.equal(calls.length, 4);
+  assertWrite(calls[0], 'PUT', resourceUrl(DOMAIN));
+  assertWrite(calls[1], 'DELETE', resourceUrl(DOMAIN));
+  assertWrite(calls[2], 'PUT', sitemapWireUrl(DOMAIN, SITEMAP_PORT));
+  assertWrite(calls[3], 'DELETE', sitemapWireUrl(DOMAIN, SITEMAP_PORT));
+});
+
+test('DELETE 404 is already_absent and PUT 404 is google_http', async () => {
+  const { calls, catalog } = harness((request) => {
+    if (request.method === 'DELETE') return { status: 404, text: '{"error":{"message":"NOT_FOUND_CANARY"}}' };
+    return { status: 404, text: '' };
+  });
+  const added = await catalog.add_site.run({ siteUrl: DOMAIN });
+  const removed = await catalog.remove_site.run({ siteUrl: DOMAIN });
+  const submitted = await catalog.submit_sitemap.run({ siteUrl: DOMAIN, path: SITEMAP_PORT });
+  const sitemap = await catalog.remove_sitemap.run({ siteUrl: DOMAIN, path: SITEMAP_PORT });
+  assert.equal(added.ok, false);
+  if (!added.ok) {
+    assert.equal(added.code, 'google_http');
+    assert.equal(added.message.includes('404'), true);
+  }
+  assert.equal(submitted.ok, false);
+  if (!submitted.ok) assert.equal(submitted.code, 'google_http');
+  assert.equal(removed.ok, true, JSON.stringify(removed));
+  if (removed.ok) assert.equal(removed.value.outcome, 'already_absent');
+  assert.equal(sitemap.ok, true, JSON.stringify(sitemap));
+  if (sitemap.ok) assert.equal(sitemap.value.outcome, 'already_absent');
+  assert.equal(JSON.stringify(removed).includes('NOT_FOUND_CANARY'), false);
+  assert.equal(JSON.stringify(sitemap).includes('NOT_FOUND_CANARY'), false);
+  assert.equal(calls.length, 4);
+  assertWrite(calls[0], 'PUT', resourceUrl(DOMAIN));
+  assertWrite(calls[1], 'DELETE', resourceUrl(DOMAIN));
+  assertWrite(calls[2], 'PUT', sitemapWireUrl(DOMAIN, SITEMAP_PORT));
+  assertWrite(calls[3], 'DELETE', sitemapWireUrl(DOMAIN, SITEMAP_PORT));
 });

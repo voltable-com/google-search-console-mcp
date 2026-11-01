@@ -71,7 +71,7 @@ function session(child: ChildProcessWithoutNullStreams) {
   };
 }
 
-test('stdio tools/list names list_sites, search_analytics, inspect_url, and list_sitemaps', async () => {
+test('stdio tools/list names the eight catalog tools', async () => {
   const child = serve();
   const client = session(child);
   try {
@@ -101,7 +101,16 @@ test('stdio tools/list names list_sites, search_analytics, inspect_url, and list
       assert.equal(typeof tool.name, 'string');
       return tool.name;
     });
-    assert.deepEqual(names, ['list_sites', 'search_analytics', 'inspect_url', 'list_sitemaps']);
+    assert.deepEqual(names, [
+      'list_sites',
+      'search_analytics',
+      'inspect_url',
+      'list_sitemaps',
+      'add_site',
+      'remove_site',
+      'submit_sitemap',
+      'remove_sitemap',
+    ]);
   } finally {
     child.stdin.end();
     const timer = setTimeout(() => child.kill(), 3000);

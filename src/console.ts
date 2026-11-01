@@ -2,11 +2,13 @@ import * as z from 'zod/v4';
 import type { TokenSource } from './token.js';
 
 declare const siteUrlBrand: unique symbol;
+declare const sitemapUrlBrand: unique symbol;
 declare const inspectionUrlBrand: unique symbol;
 declare const isoDateBrand: unique symbol;
 declare const countryCodeBrand: unique symbol;
 
 export type SiteUrl = string & { readonly [siteUrlBrand]: 'SiteUrl' };
+export type SitemapUrl = string & { readonly [sitemapUrlBrand]: 'SitemapUrl' };
 export type InspectionUrl = string & { readonly [inspectionUrlBrand]: 'InspectionUrl' };
 export type IsoDate = string & { readonly [isoDateBrand]: 'IsoDate' };
 export type CountryCode = string & { readonly [countryCodeBrand]: 'CountryCode' };
@@ -54,7 +56,21 @@ const INSPECT_URL_DESCRIPTION =
   '`inspect_url` reports the indexed URL. It does not fetch the live page. `inspectionUrl` is an absolute `http` or `https` URL under the property. `languageCode` is an optional BCP-47 tag. When it is omitted, the request omits it and Google uses `en-US`. `verdict` of `PASS` means valid, `FAIL` means error, and `NEUTRAL` means excluded. `coverageState` is Google\'s text, copied through. `referringUrls`, `sitemaps`, AMP `issues`, and rich-result `items` each keep Google\'s order and hold at most 20 entries. `referringUrlCount`, `sitemapCount`, `issueCount`, and `itemCount` are the full counts before those caps. The counts are not fields on `UrlInspectionResult`. `amp` is null when Google omits `ampResult`. Otherwise it carries `verdict`, `ampUrl`, `robotsTxtState`, `indexingState`, `ampIndexStatusVerdict`, `lastCrawlTime`, `pageFetchState`, `issues` of `message` plus `severity`, and `issueCount`. The result has no mobile usability object.';
 
 const LIST_SITEMAPS_DESCRIPTION =
-  '`list_sitemaps` lists sitemaps for one property. Pass `sitemapIndex`, the index URL, to list that index\'s children. Timestamps are Google\'s strings, or null when Google omits them. `type` and each contents `type` are Google\'s strings, copied through. This tool does not submit or delete sitemaps.';
+  '`list_sitemaps` lists sitemaps for one property. Pass `sitemapIndex`, the index URL, to list that index\'s children. Timestamps are Google\'s strings, or null when Google omits them. `type` and each contents `type` are Google\'s strings, copied through. `submit_sitemap` submits a sitemap and `remove_sitemap` deletes one.';
+
+const ADD_SITE_DESCRIPTION =
+  '`add_site` adds one Search Console property. `siteUrl` is a URL-prefix that ends with a slash, or a domain property `sc-domain:` plus a host with no slash. Adding the property does not verify it. This tool does not submit a sitemap.';
+
+const REMOVE_SITE_DESCRIPTION =
+  '`remove_site` deletes the Search Console property `siteUrl` from this Google account. Copy `siteUrl` from `list_sites`. Deleting a domain property leaves a URL-prefix property for the same host in place. This tool does not remove individual URLs from Google Search. `outcome` `removed` means Google accepted the delete. `outcome` `already_absent` means Google returned HTTP 404.';
+
+const SUBMIT_SITEMAP_DESCRIPTION =
+  '`submit_sitemap` submits one sitemap for one property. Copy `siteUrl` from `list_sites`. `path` is an absolute http or https URL, the same string `list_sitemaps` returns as `path`. A port is allowed. Submitting the same sitemap again returns the same `siteUrl` and `path`.';
+
+const REMOVE_SITEMAP_DESCRIPTION =
+  '`remove_sitemap` deletes the sitemap `path` from the property `siteUrl`. Copy `path` from `list_sitemaps`. Deleting the sitemap does not remove the listed URLs from Google Search. `outcome` `removed` means Google accepted the delete. `outcome` `already_absent` means Google returned HTTP 404.';
+
+const SITEMAP_PATH_MESSAGE = 'Pass an absolute http or https URL with no username or password.';
 
 export type FailureCode = 'invalid_args' | 'not_logged_in' | 'not_in_property' | 'google_http' | 'bad_response';
 
@@ -140,12 +156,22 @@ export type Sitemap = {
 
 export type SitemapList = { sitemaps: readonly Sitemap[] };
 
-export type WireRequest = {
-  method: 'GET' | 'POST';
-  url: string;
-  authorization: string;
-  body?: unknown;
-};
+export type RemovalOutcome = 'removed' | 'already_absent';
+export type AddedSite = { siteUrl: SiteUrl };
+export type SubmittedSitemap = { siteUrl: SiteUrl; path: SitemapUrl };
+export type RemovedSite = { siteUrl: SiteUrl; outcome: RemovalOutcome };
+export type RemovedSitemap = { siteUrl: SiteUrl; path: SitemapUrl; outcome: RemovalOutcome };
+
+type UnsignedRequest =
+  | { method: 'GET'; url: string }
+  | { method: 'POST'; url: string; body: unknown }
+  | { method: 'PUT'; url: string }
+  | { method: 'DELETE'; url: string };
+
+export type WireRequest = UnsignedRequest & { authorization: string };
+
+type EmptyBody = { kind: 'empty' };
+type DeleteBody = { kind: 'empty' } | { kind: 'absent' };
 
 export type WireResponse = { status: number; text: string };
 
@@ -167,6 +193,10 @@ export type Catalog = {
   search_analytics: Tool<AnalyticsPage>;
   inspect_url: Tool<Inspection>;
   list_sitemaps: Tool<SitemapList>;
+  add_site: Tool<AddedSite>;
+  remove_site: Tool<RemovedSite>;
+  submit_sitemap: Tool<SubmittedSitemap>;
+  remove_sitemap: Tool<RemovedSitemap>;
 };
 
 type AnalyticsWireBody = {
@@ -259,6 +289,15 @@ const listSitemapsSchema = z.strictObject({
   sitemapIndex: z.string().min(1).optional(),
 });
 
+const siteWriteSchema = z.strictObject({
+  siteUrl: z.string(),
+});
+
+const sitemapWriteSchema = z.strictObject({
+  siteUrl: z.string(),
+  path: z.string(),
+});
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -276,6 +315,17 @@ function isInspectionUrl(value: string): value is InspectionUrl {
     return false;
   }
   return url.username === '' && url.password === '' && url.port === '' && (url.protocol === 'http:' || url.protocol === 'https:');
+}
+
+function isSitemapUrl(value: string): value is SitemapUrl {
+  if (/\s/.test(value)) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return (url.protocol === 'http:' || url.protocol === 'https:') && url.hostname !== '' && url.username === '' && url.password === '';
 }
 
 function isIsoDate(value: string): value is IsoDate {
@@ -484,8 +534,12 @@ function analyticsBody(args: ParsedAnalytics): AnalyticsWireBody {
   return body;
 }
 
+function siteResourceUrl(site: SiteUrl): string {
+  return `${SITES_URL}/${encodeURIComponent(site)}`;
+}
+
 function analyticsUrl(site: SiteUrl): string {
-  return `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site)}/searchAnalytics/query`;
+  return `${siteResourceUrl(site)}/searchAnalytics/query`;
 }
 
 function parseRow(dimensions: readonly GroupDimension[], value: unknown): AnalyticsRow | null {
@@ -752,9 +806,13 @@ async function queryInspection(deps: ConsoleDeps, raw: unknown): Promise<ToolRes
 }
 
 function sitemapsUrl(site: SiteUrl, sitemapIndex: string | undefined): string {
-  const base = `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site)}/sitemaps`;
+  const base = `${siteResourceUrl(site)}/sitemaps`;
   if (sitemapIndex === undefined) return base;
   return `${base}?sitemapIndex=${encodeURIComponent(sitemapIndex)}`;
+}
+
+function sitemapResourceUrl(site: SiteUrl, path: SitemapUrl): string {
+  return `${siteResourceUrl(site)}/sitemaps/${encodeURIComponent(path)}`;
 }
 
 function parseContents(value: unknown): SitemapContent[] | null {
@@ -828,28 +886,82 @@ function googleErrorMessage(text: string): string | null {
   }
 }
 
-function fromHttp(response: WireResponse | null): ToolResult<unknown> {
-  if (response === null) {
-    return {
-      ok: false,
-      code: 'google_http',
-      message: 'The Search Console request failed before a response. Retry the call.',
-    };
-  }
-  if (response.status < 200 || response.status >= 300) {
-    const detail = googleErrorMessage(response.text);
-    const suffix = detail === null ? '' : `: ${detail}`;
-    return {
-      ok: false,
-      code: 'google_http',
-      message: `Google Search Console returned HTTP ${response.status}${suffix}. Retry the call.`,
-    };
-  }
+function transportFailure(): ToolResult<never> {
+  return {
+    ok: false,
+    code: 'google_http',
+    message: 'The Search Console request failed before a response. Retry the call.',
+  };
+}
+
+function statusFailure(response: WireResponse): ToolResult<never> | null {
+  if (response.status >= 200 && response.status < 300) return null;
+  const detail = googleErrorMessage(response.text);
+  const suffix = detail === null ? '' : `: ${detail}`;
+  return {
+    ok: false,
+    code: 'google_http',
+    message: `Google Search Console returned HTTP ${response.status}${suffix}. Retry the call.`,
+  };
+}
+
+function parseJsonBody(response: WireResponse | null): ToolResult<unknown> {
+  if (response === null) return transportFailure();
+  const failed = statusFailure(response);
+  if (failed !== null) return failed;
   try {
     const value: unknown = JSON.parse(response.text);
     return { ok: true, value };
   } catch {
     return badResponse();
+  }
+}
+
+function parseEmptyBody(response: WireResponse | null): ToolResult<EmptyBody> {
+  if (response === null) return transportFailure();
+  const failed = statusFailure(response);
+  if (failed !== null) return failed;
+  if (response.text !== '') return badResponse();
+  return { ok: true, value: { kind: 'empty' } };
+}
+
+function parseDeleteBody(response: WireResponse | null): ToolResult<DeleteBody> {
+  if (response === null) return transportFailure();
+  // A missing property or sitemap is a completed delete. A missing PUT target is not.
+  if (response.status === 404) return { ok: true, value: { kind: 'absent' } };
+  return parseEmptyBody(response);
+}
+
+function interpret(method: UnsignedRequest['method'], response: WireResponse | null): ToolResult<unknown> {
+  switch (method) {
+    case 'GET':
+    case 'POST':
+      return parseJsonBody(response);
+    case 'PUT':
+      return parseEmptyBody(response);
+    case 'DELETE':
+      return parseDeleteBody(response);
+    default: {
+      const exhaustive: never = method;
+      return exhaustive;
+    }
+  }
+}
+
+function signed(request: UnsignedRequest, authorization: string): WireRequest {
+  switch (request.method) {
+    case 'GET':
+      return { method: 'GET', url: request.url, authorization };
+    case 'POST':
+      return { method: 'POST', url: request.url, body: request.body, authorization };
+    case 'PUT':
+      return { method: 'PUT', url: request.url, authorization };
+    case 'DELETE':
+      return { method: 'DELETE', url: request.url, authorization };
+    default: {
+      const exhaustive: never = request;
+      return exhaustive;
+    }
   }
 }
 
@@ -863,33 +975,112 @@ async function callHttp(http: Http, request: WireRequest): Promise<WireResponse 
   }
 }
 
-async function send(deps: ConsoleDeps, request: Omit<WireRequest, 'authorization'>): Promise<ToolResult<unknown>> {
+function send(deps: ConsoleDeps, request: Extract<UnsignedRequest, { method: 'GET' | 'POST' }>): Promise<ToolResult<unknown>>;
+function send(deps: ConsoleDeps, request: Extract<UnsignedRequest, { method: 'PUT' }>): Promise<ToolResult<EmptyBody>>;
+function send(deps: ConsoleDeps, request: Extract<UnsignedRequest, { method: 'DELETE' }>): Promise<ToolResult<DeleteBody>>;
+async function send(deps: ConsoleDeps, request: UnsignedRequest): Promise<ToolResult<unknown>> {
   const http = deps.http ?? nodeHttp;
   const firstToken = await deps.tokens.accessToken();
   if (!firstToken.ok) return { ok: false, code: 'not_logged_in', message: firstToken.message };
-  const first = await callHttp(http, { ...request, authorization: `Bearer ${firstToken.token}` });
+  const first = await callHttp(http, signed(request, `Bearer ${firstToken.token}`));
   if (first !== null && first.status === 401) {
     const secondToken = await deps.tokens.refresh();
     if (!secondToken.ok) return { ok: false, code: 'not_logged_in', message: secondToken.message };
-    const second = await callHttp(http, { ...request, authorization: `Bearer ${secondToken.token}` });
+    const second = await callHttp(http, signed(request, `Bearer ${secondToken.token}`));
     if (second !== null && second.status === 401) {
       return { ok: false, code: 'not_logged_in', message: 'Run node dist/main.js login' };
     }
-    return fromHttp(second);
+    return interpret(request.method, second);
   }
-  return fromHttp(first);
+  return interpret(request.method, first);
 }
 
 async function nodeHttp(request: WireRequest): Promise<WireResponse> {
   const headers = new Headers();
   headers.set('authorization', request.authorization);
   const init: RequestInit = { method: request.method, headers };
-  if (request.body !== undefined) {
-    headers.set('content-type', 'application/json');
-    init.body = JSON.stringify(request.body);
+  switch (request.method) {
+    case 'GET':
+    case 'PUT':
+    case 'DELETE':
+      break;
+    case 'POST':
+      headers.set('content-type', 'application/json');
+      init.body = JSON.stringify(request.body);
+      break;
+    default: {
+      const exhaustive: never = request;
+      return exhaustive;
+    }
   }
   const response = await fetch(request.url, init);
   return { status: response.status, text: await response.text() };
+}
+
+function removalOutcome(body: DeleteBody): RemovalOutcome {
+  switch (body.kind) {
+    case 'empty':
+      return 'removed';
+    case 'absent':
+      return 'already_absent';
+    default: {
+      const exhaustive: never = body;
+      return exhaustive;
+    }
+  }
+}
+
+function parseSiteWrite(raw: unknown): ToolResult<SiteUrl> {
+  const parsed = siteWriteSchema.safeParse(raw);
+  if (!parsed.success) return invalidArgs(issueMessage(parsed.error.issues));
+  if (!isSiteUrl(parsed.data.siteUrl)) return invalidArgs('Check siteUrl.');
+  return { ok: true, value: parsed.data.siteUrl };
+}
+
+function parseSitemapWrite(raw: unknown): ToolResult<{ siteUrl: SiteUrl; path: SitemapUrl }> {
+  const parsed = sitemapWriteSchema.safeParse(raw);
+  if (!parsed.success) return invalidArgs(issueMessage(parsed.error.issues));
+  if (!isSiteUrl(parsed.data.siteUrl)) return invalidArgs('Check siteUrl.');
+  if (!isSitemapUrl(parsed.data.path)) return invalidArgs(SITEMAP_PATH_MESSAGE);
+  return { ok: true, value: { siteUrl: parsed.data.siteUrl, path: parsed.data.path } };
+}
+
+async function addSite(deps: ConsoleDeps, raw: unknown): Promise<ToolResult<AddedSite>> {
+  const parsed = parseSiteWrite(raw);
+  if (!parsed.ok) return parsed;
+  const sent = await send(deps, { method: 'PUT', url: siteResourceUrl(parsed.value) });
+  if (!sent.ok) return sent;
+  return { ok: true, value: { siteUrl: parsed.value } };
+}
+
+async function removeSite(deps: ConsoleDeps, raw: unknown): Promise<ToolResult<RemovedSite>> {
+  const parsed = parseSiteWrite(raw);
+  if (!parsed.ok) return parsed;
+  const sent = await send(deps, { method: 'DELETE', url: siteResourceUrl(parsed.value) });
+  if (!sent.ok) return sent;
+  return { ok: true, value: { siteUrl: parsed.value, outcome: removalOutcome(sent.value) } };
+}
+
+async function submitSitemap(deps: ConsoleDeps, raw: unknown): Promise<ToolResult<SubmittedSitemap>> {
+  const parsed = parseSitemapWrite(raw);
+  if (!parsed.ok) return parsed;
+  const sent = await send(deps, { method: 'PUT', url: sitemapResourceUrl(parsed.value.siteUrl, parsed.value.path) });
+  if (!sent.ok) return sent;
+  return { ok: true, value: { siteUrl: parsed.value.siteUrl, path: parsed.value.path } };
+}
+
+async function removeSitemap(deps: ConsoleDeps, raw: unknown): Promise<ToolResult<RemovedSitemap>> {
+  const parsed = parseSitemapWrite(raw);
+  if (!parsed.ok) return parsed;
+  const sent = await send(deps, {
+    method: 'DELETE',
+    url: sitemapResourceUrl(parsed.value.siteUrl, parsed.value.path),
+  });
+  if (!sent.ok) return sent;
+  return {
+    ok: true,
+    value: { siteUrl: parsed.value.siteUrl, path: parsed.value.path, outcome: removalOutcome(sent.value) },
+  };
 }
 
 function logStatus(method: string, url: string, status: number): void {
@@ -926,6 +1117,34 @@ export function toolCatalog(deps: ConsoleDeps): Catalog {
       inputSchema: listSitemapsSchema,
       run(args: unknown) {
         return querySitemaps(deps, args);
+      },
+    },
+    add_site: {
+      description: ADD_SITE_DESCRIPTION,
+      inputSchema: siteWriteSchema,
+      run(args: unknown) {
+        return addSite(deps, args);
+      },
+    },
+    remove_site: {
+      description: REMOVE_SITE_DESCRIPTION,
+      inputSchema: siteWriteSchema,
+      run(args: unknown) {
+        return removeSite(deps, args);
+      },
+    },
+    submit_sitemap: {
+      description: SUBMIT_SITEMAP_DESCRIPTION,
+      inputSchema: sitemapWriteSchema,
+      run(args: unknown) {
+        return submitSitemap(deps, args);
+      },
+    },
+    remove_sitemap: {
+      description: REMOVE_SITEMAP_DESCRIPTION,
+      inputSchema: sitemapWriteSchema,
+      run(args: unknown) {
+        return removeSitemap(deps, args);
       },
     },
   };

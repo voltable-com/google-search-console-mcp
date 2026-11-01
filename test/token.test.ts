@@ -4,11 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { toolCatalog, type Http } from '../dist/console.js';
-import { login, openTokenStore, READONLY_SCOPE, TOKEN_PARTIAL_SUFFIX, type OAuthExchange } from '../dist/token.js';
+import { login, openTokenStore, SCOPE, TOKEN_PARTIAL_SUFFIX, type OAuthExchange } from '../dist/token.js';
 
 const CLIENT_JSON = JSON.stringify({
   installed: { client_id: 'test-client', client_secret: 'test-secret' },
 });
+
+const READONLY_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
 
 async function tempEnv(): Promise<{ dir: string; env: NodeJS.ProcessEnv; tokenFile: string }> {
   const dir = await mkdtemp(join(tmpdir(), 'gsc-token-'));
@@ -22,11 +24,11 @@ async function tempEnv(): Promise<{ dir: string; env: NodeJS.ProcessEnv; tokenFi
   return { dir, env, tokenFile };
 }
 
-function exchange(refreshToken: string, seen: string[]): OAuthExchange {
+function exchange(refreshToken: string, seen: string[], grantedScope = SCOPE): OAuthExchange {
   return {
     async start(redirectUri: string) {
       seen.push(redirectUri);
-      return { refreshToken };
+      return { refreshToken, grantedScope };
     },
   };
 }
@@ -42,7 +44,7 @@ test('two successful logins leave one token file mode 0o600 with the second refr
     const info = await stat(tokenFile);
     assert.equal(info.mode & 0o777, 0o600);
     const parsed: unknown = JSON.parse(await readFile(tokenFile, 'utf8'));
-    assert.deepEqual(parsed, { refreshToken: 'second-refresh', scope: READONLY_SCOPE });
+    assert.deepEqual(parsed, { refreshToken: 'second-refresh', scope: SCOPE });
     assert.match(seen[0] ?? '', /^http:\/\/127\.0\.0\.1:\d+\/$/);
     assert.match(seen[1] ?? '', /^http:\/\/127\.0\.0\.1:\d+\/$/);
   } finally {
@@ -70,6 +72,61 @@ test('a failed second login leaves the first token file unchanged', async () => 
   }
 });
 
+test('a read-only grant leaves the previous token file unchanged', async () => {
+  const { dir, env, tokenFile } = await tempEnv();
+  try {
+    await login(env, exchange('first-refresh', []));
+    const before = await readFile(tokenFile);
+    await assert.rejects(() => login(env, exchange('second-refresh', [], READONLY_SCOPE)));
+    const after = await readFile(tokenFile);
+    assert.deepEqual(after, before);
+    const names = (await readdir(dir)).filter((name) => name.includes('token'));
+    assert.deepEqual(names, ['token.json']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an empty grant leaves the previous token file unchanged', async () => {
+  const { dir, env, tokenFile } = await tempEnv();
+  try {
+    await login(env, exchange('first-refresh', []));
+    const before = await readFile(tokenFile);
+    await assert.rejects(() => login(env, exchange('second-refresh', [], '')));
+    const after = await readFile(tokenFile);
+    assert.deepEqual(after, before);
+    const names = (await readdir(dir)).filter((name) => name.includes('token'));
+    assert.deepEqual(names, ['token.json']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a stored read-only scope returns not_logged_in and does not call HTTP', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gsc-token-'));
+  const tokenFile = join(dir, 'token.json');
+  const calls: string[] = [];
+  const http: Http = async () => {
+    calls.push('called');
+    return { status: 200, text: '{}' };
+  };
+  try {
+    await writeFile(tokenFile, JSON.stringify({ refreshToken: 'old-refresh', scope: READONLY_SCOPE }));
+    const result = await toolCatalog({
+      tokens: openTokenStore({ GSC_TOKEN_FILE: tokenFile, GSC_OAUTH_CLIENT_FILE: '' }),
+      http,
+    }).list_sites.run({});
+    assert.equal(calls.length, 0);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.code, 'not_logged_in');
+      assert.equal(result.message, 'Run node dist/main.js login');
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('a partial sibling is never read into a tool error', async () => {
   const { dir, env, tokenFile } = await tempEnv();
   const canary = 'partial-canary-9f3c1e';
@@ -81,7 +138,7 @@ test('a partial sibling is never read into a tool error', async () => {
   try {
     await writeFile(
       `${tokenFile}${TOKEN_PARTIAL_SUFFIX}`,
-      JSON.stringify({ refreshToken: canary, scope: READONLY_SCOPE, leak: canary }),
+      JSON.stringify({ refreshToken: canary, scope: SCOPE, leak: canary }),
     );
     const missingCatalog = toolCatalog({ tokens: openTokenStore(env), http });
     const missing = await missingCatalog.list_sites.run({});

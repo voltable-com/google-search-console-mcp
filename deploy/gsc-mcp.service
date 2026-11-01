@@ -1,5 +1,5 @@
 [Unit]
-Description=GSC MCP server (Search Console read-only, streamable HTTP)
+Description=GSC MCP server (Search Console, streamable HTTP)
 After=network.target
 
 [Service]

@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { OAuth2Client } from 'google-auth-library';
 
-export const READONLY_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly' as const;
+export const SCOPE = 'https://www.googleapis.com/auth/webmasters' as const;
 export const TOKEN_PARTIAL_SUFFIX = '.partial';
 const REFRESH_SKEW_MS = 60_000;
 const LOGIN_MESSAGE = 'Run node dist/main.js login';
@@ -20,7 +20,7 @@ export type AccessToken = string & { readonly [accessTokenBrand]: 'AccessToken' 
 
 export type StoredToken = {
   refreshToken: string;
-  scope: typeof READONLY_SCOPE;
+  scope: typeof SCOPE;
 };
 
 export type TokenResult = { ok: true; token: AccessToken } | { ok: false; message: string };
@@ -31,7 +31,7 @@ export type TokenSource = {
 };
 
 export type OAuthExchange = {
-  start(redirectUri: string): Promise<{ refreshToken: string } | { error: string }>;
+  start(redirectUri: string): Promise<{ refreshToken: string; grantedScope: string } | { error: string }>;
 };
 
 type DesktopClient =
@@ -89,8 +89,8 @@ async function readStoredToken(file: string): Promise<StoredRead> {
   if (!isRecord(json)) return { ok: false, message: LOGIN_MESSAGE };
   const refreshToken = json.refreshToken;
   if (typeof refreshToken !== 'string' || refreshToken === '') return { ok: false, message: LOGIN_MESSAGE };
-  if (json.scope !== READONLY_SCOPE) return { ok: false, message: LOGIN_MESSAGE };
-  return { ok: true, token: { refreshToken, scope: READONLY_SCOPE } };
+  if (json.scope !== SCOPE) return { ok: false, message: LOGIN_MESSAGE };
+  return { ok: true, token: { refreshToken, scope: SCOPE } };
 }
 
 async function readDesktopClient(file: string | undefined): Promise<DesktopClient> {
@@ -147,6 +147,22 @@ async function publishStoredToken(file: string, token: StoredToken): Promise<voi
   }
   // A crash before this rename leaves the previous token file as the current file.
   await rename(partial, file);
+}
+
+// webmasters.readonly begins with the webmasters scope, so a substring check would accept it.
+function scopeGranted(granted: string): boolean {
+  return granted.split(/\s+/).includes(SCOPE);
+}
+
+async function publishGranted(file: string, refreshToken: string, granted: string): Promise<void> {
+  if (!scopeGranted(granted)) {
+    const message =
+      'Google did not grant the Search Console scope. Add https://www.googleapis.com/auth/webmasters on the consent screen and run node dist/main.js login';
+    console.error(message);
+    throw new Error(message);
+  }
+  await publishStoredToken(file, { refreshToken, scope: SCOPE });
+  console.error('Logged in. Restart the server if it is already running.');
 }
 
 function endText(response: ServerResponse, status: number, text: string): void {
@@ -252,7 +268,7 @@ async function loginWithGoogle(client: DesktopClient & { ok: true }, loopback: L
   const authUrl = oauth.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
-    scope: [READONLY_SCOPE],
+    scope: [SCOPE],
     state: loopback.state,
     redirect_uri: loopback.redirectUri,
   });
@@ -260,9 +276,11 @@ async function loginWithGoogle(client: DesktopClient & { ok: true }, loopback: L
   await tryOpen(authUrl);
   const code = await loopback.waitForCode();
   let refreshToken: string | null | undefined;
+  let grantedScope: string | null | undefined;
   try {
     const exchanged = await oauth.getToken({ code, redirect_uri: loopback.redirectUri });
     refreshToken = exchanged.tokens.refresh_token;
+    grantedScope = exchanged.tokens.scope;
   } catch {
     console.error('Google did not return a refresh token. Run node dist/main.js login');
     throw new Error('token exchange failed');
@@ -271,8 +289,7 @@ async function loginWithGoogle(client: DesktopClient & { ok: true }, loopback: L
     console.error('Google did not return a refresh token. Run node dist/main.js login');
     throw new Error('missing refresh token');
   }
-  await publishStoredToken(tokenFile, { refreshToken, scope: READONLY_SCOPE });
-  console.error('Logged in. Restart the server if it is already running.');
+  await publishGranted(tokenFile, refreshToken, grantedScope ?? '');
 }
 
 export function openTokenStore(env: NodeJS.ProcessEnv): TokenSource {
@@ -338,8 +355,7 @@ export async function login(env: NodeJS.ProcessEnv, oauth?: OAuthExchange): Prom
         console.error(message);
         throw new Error(message);
       }
-      await publishStoredToken(tokenFile, { refreshToken: result.refreshToken, scope: READONLY_SCOPE });
-      console.error('Logged in. Restart the server if it is already running.');
+      await publishGranted(tokenFile, result.refreshToken, result.grantedScope);
       return;
     }
     await loginWithGoogle(client, loopback, tokenFile);

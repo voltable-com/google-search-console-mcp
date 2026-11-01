@@ -2,9 +2,9 @@
 
 ## Usage (caller's view)
 
-The caller is the Cursor agent, plus the person who logs in once. The agent does not import this package. It calls four tools. The person runs login in a terminal, then Cursor starts the same program as a stdio server.
+The caller is the Cursor agent, plus the person who logs in once. The agent does not import this package. It calls eight tools. The person runs login in a terminal, then Cursor starts the same program as a stdio server.
 
-Create a Google Cloud desktop OAuth client, enable the Search Console API, and download the client JSON outside the repo. The consent screen uses only `https://www.googleapis.com/auth/webmasters.readonly`.
+Create a Google Cloud desktop OAuth client, enable the Search Console API, and download the client JSON outside the repo. The consent screen uses only `https://www.googleapis.com/auth/webmasters`.
 
 `GSC_OAUTH_CLIENT_FILE` points at that JSON. The token file defaults to `~/.local/share/gsc-mcp/token.json`. `GSC_TOKEN_FILE` overrides the token path. Neither file lives in the repo. `.cursor/mcp.json` holds the path, not the secret.
 
@@ -33,6 +33,8 @@ The server starts even when the token file is missing, so Cursor can list tools.
 ```json
 { "code": "not_logged_in", "message": "Run node dist/main.js login" }
 ```
+
+A token file that still stores `https://www.googleapis.com/auth/webmasters.readonly` returns that same failure before any Search Console HTTP call. Run `node dist/main.js login` again, then restart the server.
 
 `list_sites` takes no arguments. `permissionLevel` is one of `siteOwner`, `siteFullUser`, `siteRestrictedUser`, or `siteUnverifiedUser`, confirmed from the sites resource this session. The parser still accepts any string, so a new level does not drop the property. Pass `siteUrl` to the other tools unchanged. A URL-prefix property ends with a slash. A domain property looks like `sc-domain:example.com`.
 
@@ -124,7 +126,7 @@ The server starts even when the token file is missing, so Cursor can list tools.
 }
 ```
 
-`list_sitemaps` lists sitemaps for one property. Pass `sitemapIndex`, the index URL, to list that index's children. Timestamps are Google's strings, or null when Google omits them. `type` and each contents `type` are Google's strings, copied through. This tool does not submit or delete sitemaps.
+`list_sitemaps` lists sitemaps for one property. Pass `sitemapIndex`, the index URL, to list that index's children. Timestamps are Google's strings, or null when Google omits them. `type` and each contents `type` are Google's strings, copied through. `submit_sitemap` submits a sitemap and `remove_sitemap` deletes one.
 
 ```json
 {
@@ -151,4 +153,55 @@ The server starts even when the token file is missing, so Cursor can list tools.
 }
 ```
 
+`add_site` adds one Search Console property. `siteUrl` is a URL-prefix that ends with a slash, or a domain property `sc-domain:` plus a host with no slash. Adding the property does not verify it. This tool does not submit a sitemap.
+
+```json
+{ "siteUrl": "sc-domain:example.com" }
+```
+
+The result echoes `siteUrl`.
+
+```json
+{ "siteUrl": "sc-domain:example.com" }
+```
+
+`remove_site` deletes the Search Console property `siteUrl` from this Google account. Copy `siteUrl` from `list_sites`. Deleting a domain property leaves a URL-prefix property for the same host in place. This tool does not remove individual URLs from Google Search. `outcome` `removed` means Google accepted the delete. `outcome` `already_absent` means Google returned HTTP 404.
+
+```json
+{ "siteUrl": "sc-domain:example.com", "outcome": "removed" }
+```
+
+`submit_sitemap` submits one sitemap for one property. Copy `siteUrl` from `list_sites`. `path` is an absolute http or https URL, the same string `list_sitemaps` returns as `path`. A port is allowed. Submitting the same sitemap again returns the same `siteUrl` and `path`.
+
+```json
+{
+  "siteUrl": "sc-domain:example.com",
+  "path": "https://www.example.com/sitemap.xml"
+}
+```
+
+The result echoes `siteUrl` and `path`.
+
+`remove_sitemap` deletes the sitemap `path` from the property `siteUrl`. Copy `path` from `list_sitemaps`. Deleting the sitemap does not remove the listed URLs from Google Search. `outcome` `removed` means Google accepted the delete. `outcome` `already_absent` means Google returned HTTP 404.
+
+```json
+{
+  "siteUrl": "sc-domain:example.com",
+  "path": "https://www.example.com/sitemap.xml",
+  "outcome": "removed"
+}
+```
+
+URL removal from Google Search is absent. The Indexing API stays out.
+
 Other failures use the same JSON shape with `code` of `invalid_args`, `not_in_property`, `google_http`, or `bad_response`. Messages name the next action. They never include a token, a client secret, or a raw response body.
+
+## Serve over HTTPS
+
+`serve-http` exposes the same eight tools as one streamable HTTP endpoint, for hosts that connect by URL instead of spawning a process. `GSC_HTTP_PORT` picks the port (default 8097). The server binds `127.0.0.1` only and answers `403` to any other `Host` or `Origin`, so it is reached through a reverse proxy.
+
+```text
+GSC_HTTP_PORT=8097 node dist/main.js serve-http
+```
+
+On mini.local the build lives in `/srv/gsc-mcp` and systemd runs it as `gsc-mcp.service` (`deploy/gsc-mcp.service`). nginx serves it at `https://mini.local/mcp/gsc/`. The client JSON and token file sit in `toni`'s home there. Google refresh tokens go stale; rerun `login` on the workstation and copy `token.json` over, then restart the service, because the process reads the token file once at startup.
