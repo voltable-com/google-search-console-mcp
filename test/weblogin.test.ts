@@ -9,7 +9,7 @@ import { SCOPE, type Adopted, type TokenResult, type TokenStore } from '../dist/
 import { openWebLogin, type WebExchangeResult } from '../dist/weblogin.js';
 
 const LOGIN_URL = 'https://mini.local/mcp/gsc/login/';
-const LOOPBACK_ORIGIN = 'http://127.0.0.1:9';
+const LOOPBACK_ORIGIN = 'http://127.0.0.1:41799';
 const READONLY_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
 const GRANTED: WebExchangeResult = { refreshToken: 'refresh-1', grantedScope: SCOPE };
 
@@ -157,7 +157,7 @@ test('GET /login/ begins the login with a loopback authorize link and instructio
     assert.match(html, /client_id=test-client/);
     assert.match(html, /access_type=offline/);
     assert.match(html, /prompt=consent/);
-    assert.match(html, /redirect_uri=http%3A%2F%2F127\.0\.0\.1%3A9%2F/);
+    assert.match(html, /redirect_uri=http%3A%2F%2F127\.0\.0\.1%3A41799%2F/);
     assert.match(html, /scope=https%3A%2F%2Fwww\.googleapis\.com%2Fauth%2Fwebmasters/);
     assert.match(html, /copy the FULL address from the bar and paste it below/);
     assert.match(html, /name="url"/);
@@ -226,7 +226,7 @@ test('POST with a foreign origin or path is a mismatch and the slot survives', a
     const state = stateOf(await (await h.get('/login/')).text());
     const wrongOrigin = await h.post('/login/', `http://127.0.0.1:8080/?code=x&state=${state}`);
     assert.match(await wrongOrigin.text(), /does not match the sign-in in progress/);
-    const wrongPath = await h.post('/login/', `http://127.0.0.1:9/callback?code=x&state=${state}`);
+    const wrongPath = await h.post('/login/', `http://127.0.0.1:41799/callback?code=x&state=${state}`);
     assert.match(await wrongPath.text(), /does not match the sign-in in progress/);
     const notAUrl = await h.post('/login/', 'the whole address bar please');
     assert.match(await notAUrl.text(), /does not match the sign-in in progress/);
@@ -331,7 +331,7 @@ test('an oversized login body answers 413 and the slot survives', async () => {
 test('POST without urlencoded content type is not handled', async () => {
   const h = await harness();
   try {
-    const response = await h.postRaw('/mcp/gsc/login/', '{"url":"http://127.0.0.1:9/"}', 'application/json');
+    const response = await h.postRaw('/mcp/gsc/login/', '{"url":"http://127.0.0.1:41799/"}', 'application/json');
     assert.equal(response.status, 404);
     assert.equal(await response.text(), 'mcp-stub');
   } finally {

@@ -19,7 +19,7 @@ export type WebLogin = {
 };
 
 const PREFIX = '/mcp/gsc';
-const LOOPBACK_REDIRECT = 'http://127.0.0.1:9/';
+const LOOPBACK_REDIRECT = 'http://127.0.0.1:41799/';
 const SLOT_TTL_MS = 15 * 60_000;
 const MAX_BODY_BYTES = 8 * 1024;
 const NOT_CONFIGURED =
@@ -165,7 +165,7 @@ export function openWebLogin(deps: WebLoginDeps): WebLogin {
       endHtml(response, mismatchPage(pathname));
       return;
     }
-    if (parsed.origin !== 'http://127.0.0.1:9' || parsed.pathname !== '/') {
+    if (parsed.origin !== 'http://127.0.0.1:41799' || parsed.pathname !== '/') {
       endHtml(response, mismatchPage(pathname));
       return;
     }
