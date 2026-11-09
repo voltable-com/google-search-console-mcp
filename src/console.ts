@@ -56,7 +56,7 @@ const INSPECT_URL_DESCRIPTION =
   '`inspect_url` reports the indexed URL. It does not fetch the live page. `inspectionUrl` is an absolute `http` or `https` URL under the property. `languageCode` is an optional BCP-47 tag. When it is omitted, the request omits it and Google uses `en-US`. `verdict` of `PASS` means valid, `FAIL` means error, and `NEUTRAL` means excluded. `coverageState` is Google\'s text, copied through. `referringUrls`, `sitemaps`, AMP `issues`, and rich-result `items` each keep Google\'s order and hold at most 20 entries. `referringUrlCount`, `sitemapCount`, `issueCount`, and `itemCount` are the full counts before those caps. The counts are not fields on `UrlInspectionResult`. `amp` is null when Google omits `ampResult`. Otherwise it carries `verdict`, `ampUrl`, `robotsTxtState`, `indexingState`, `ampIndexStatusVerdict`, `lastCrawlTime`, `pageFetchState`, `issues` of `message` plus `severity`, and `issueCount`. The result has no mobile usability object.';
 
 const LIST_SITEMAPS_DESCRIPTION =
-  '`list_sitemaps` lists sitemaps for one property. Pass `sitemapIndex`, the index URL, to list that index\'s children. Timestamps are Google\'s strings, or null when Google omits them. `type` and each contents `type` are Google\'s strings, copied through. `submit_sitemap` submits a sitemap and `remove_sitemap` deletes one.';
+  '`list_sitemaps` lists sitemaps for one property. Pass `sitemapIndex`, the index URL, to list that index\'s children. Timestamps are Google\'s strings, or null when Google omits them. `type` and each contents `type` are Google\'s strings, or null when Google omits them. `warnings`, `errors`, and each contents `submitted` and `indexed` are counts, zero when Google omits them. `submit_sitemap` submits a sitemap and `remove_sitemap` deletes one.';
 
 const ADD_SITE_DESCRIPTION =
   '`add_site` adds one Search Console property. `siteUrl` is a URL-prefix that ends with a slash, or a domain property `sc-domain:` plus a host with no slash. Adding the property does not verify it. This tool does not submit a sitemap.';
@@ -140,7 +140,7 @@ export type Inspection = {
   richResults: { verdict: string; items: readonly RichResultItem[]; itemCount: number } | null;
 };
 
-export type SitemapContent = { type: string; submitted: number; indexed: number };
+export type SitemapContent = { type: string | null; submitted: number; indexed: number };
 
 export type Sitemap = {
   path: string;
@@ -148,7 +148,7 @@ export type Sitemap = {
   lastDownloaded: string | null;
   isPending: boolean;
   isSitemapsIndex: boolean;
-  type: string;
+  type: string | null;
   warnings: number;
   errors: number;
   contents: readonly SitemapContent[];
@@ -385,6 +385,14 @@ function issueMessage(issues: readonly { message: string }[]): string | undefine
 function finiteNumber(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   return value;
+}
+
+function countField(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key];
+  if (value === undefined || value === null) return 0;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && /^[0-9]+$/.test(value)) return Number(value);
+  return null;
 }
 
 function requiredString(record: Record<string, unknown>, key: string): string | null {
@@ -820,20 +828,24 @@ function parseContents(value: unknown): SitemapContent[] | null {
   if (!Array.isArray(value)) return null;
   const contents: SitemapContent[] = [];
   for (const entry of value) {
-    if (!isRecord(entry) || typeof entry.type !== 'string') return null;
-    const submitted = finiteNumber(entry.submitted);
-    const indexed = finiteNumber(entry.indexed);
+    if (!isRecord(entry)) return null;
+    const entryType = optionalString(entry, 'type');
+    if (!entryType.ok) return null;
+    const submitted = countField(entry, 'submitted');
+    const indexed = countField(entry, 'indexed');
     if (submitted === null || indexed === null) return null;
-    contents.push({ type: entry.type, submitted, indexed });
+    contents.push({ type: entryType.value, submitted, indexed });
   }
   return contents;
 }
 
 function parseSitemap(value: unknown): Sitemap | null {
-  if (!isRecord(value) || typeof value.path !== 'string' || typeof value.type !== 'string') return null;
+  if (!isRecord(value) || typeof value.path !== 'string') return null;
+  const type = optionalString(value, 'type');
+  if (!type.ok) return null;
   if (typeof value.isPending !== 'boolean' || typeof value.isSitemapsIndex !== 'boolean') return null;
-  const warnings = finiteNumber(value.warnings);
-  const errors = finiteNumber(value.errors);
+  const warnings = countField(value, 'warnings');
+  const errors = countField(value, 'errors');
   if (warnings === null || errors === null) return null;
   const lastSubmitted = optionalString(value, 'lastSubmitted');
   const lastDownloaded = optionalString(value, 'lastDownloaded');
@@ -846,7 +858,7 @@ function parseSitemap(value: unknown): Sitemap | null {
     lastDownloaded: lastDownloaded.value,
     isPending: value.isPending,
     isSitemapsIndex: value.isSitemapsIndex,
-    type: value.type,
+    type: type.value,
     warnings,
     errors,
     contents,

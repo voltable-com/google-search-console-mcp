@@ -446,13 +446,21 @@ test('list_sitemaps copies Google fields and encodes sitemapIndex', async () => 
       sitemap: [
         {
           path: 'https://www.example.com/sitemap.xml',
-          lastSubmitted: '2026-09-01T00:00:00.000Z',
+          lastSubmitted: '2026-11-02T20:08:03.786Z',
           isPending: false,
           isSitemapsIndex: true,
+          lastDownloaded: '2026-11-08T20:22:06.541Z',
+          warnings: '0',
+          errors: '0',
+          contents: [{ type: 'web', submitted: '29594', indexed: '0' }],
+        },
+        {
+          path: 'https://www.example.com/pages.xml',
+          lastSubmitted: '2026-11-02T21:04:02.324Z',
+          isPending: false,
+          isSitemapsIndex: false,
           type: 'sitemap',
-          warnings: 0,
-          errors: 0,
-          contents: [{ type: 'web', submitted: 10, indexed: 8 }],
+          contents: [{ type: 'web', submitted: '10', indexed: '8' }],
         },
       ],
     }),
@@ -470,10 +478,21 @@ test('list_sitemaps copies Google fields and encodes sitemapIndex', async () => 
     assert.deepEqual(result.value.sitemaps, [
       {
         path: 'https://www.example.com/sitemap.xml',
-        lastSubmitted: '2026-09-01T00:00:00.000Z',
-        lastDownloaded: null,
+        lastSubmitted: '2026-11-02T20:08:03.786Z',
+        lastDownloaded: '2026-11-08T20:22:06.541Z',
         isPending: false,
         isSitemapsIndex: true,
+        type: null,
+        warnings: 0,
+        errors: 0,
+        contents: [{ type: 'web', submitted: 29594, indexed: 0 }],
+      },
+      {
+        path: 'https://www.example.com/pages.xml',
+        lastSubmitted: '2026-11-02T21:04:02.324Z',
+        lastDownloaded: null,
+        isPending: false,
+        isSitemapsIndex: false,
         type: 'sitemap',
         warnings: 0,
         errors: 0,
@@ -481,6 +500,27 @@ test('list_sitemaps copies Google fields and encodes sitemapIndex', async () => 
       },
     ]);
   }
+});
+
+test('a sitemap count that is not a digit string is bad_response', async () => {
+  const { catalog } = harness(() => ({
+    status: 200,
+    text: JSON.stringify({
+      sitemap: [
+        {
+          path: 'https://www.example.com/sitemap.xml',
+          isPending: false,
+          isSitemapsIndex: false,
+          type: 'sitemap',
+          warnings: 'many',
+          errors: '0',
+        },
+      ],
+    }),
+  }));
+  const result = await catalog.list_sitemaps.run({ siteUrl: 'sc-domain:example.com' });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.code, 'bad_response');
 });
 
 test('a google error message omits the rest of the body and a thrown request omits the token', async () => {

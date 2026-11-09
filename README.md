@@ -126,7 +126,7 @@ A token file that still stores `https://www.googleapis.com/auth/webmasters.reado
 }
 ```
 
-`list_sitemaps` lists sitemaps for one property. Pass `sitemapIndex`, the index URL, to list that index's children. Timestamps are Google's strings, or null when Google omits them. `type` and each contents `type` are Google's strings, copied through. `submit_sitemap` submits a sitemap and `remove_sitemap` deletes one.
+`list_sitemaps` lists sitemaps for one property. Pass `sitemapIndex`, the index URL, to list that index's children. Timestamps are Google's strings, or null when Google omits them. `type` and each contents `type` are Google's strings, or null when Google omits them. `warnings`, `errors`, and each contents `submitted` and `indexed` are counts, zero when Google omits them. `submit_sitemap` submits a sitemap and `remove_sitemap` deletes one.
 
 ```json
 {
@@ -144,7 +144,7 @@ A token file that still stores `https://www.googleapis.com/auth/webmasters.reado
       "lastDownloaded": "2026-09-02T00:00:00.000Z",
       "isPending": false,
       "isSitemapsIndex": true,
-      "type": "sitemap",
+      "type": null,
       "warnings": 0,
       "errors": 0,
       "contents": [{ "type": "web", "submitted": 10, "indexed": 8 }]
